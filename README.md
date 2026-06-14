@@ -38,8 +38,7 @@ If MESH-API has been useful to you — whether you're running it on a Raspberry 
 **Thank you to everyone who has donated, filed issues, tested pre-releases, and spread the word.** You are what makes this project possible. 🙏
 
 
-
-![MESH-API](https://github.com/user-attachments/assets/438dc643-6727-439d-a719-0fb905bec920)
+<img width="1151" height="251" alt="MESH-API-HEADER" src="https://github.com/user-attachments/assets/53d213fe-fd3d-4d24-b62d-5620a0c81791" />
 
 
 
