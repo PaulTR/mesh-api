@@ -333,9 +333,10 @@ You can run **one Meshtastic radio, one MeshCore radio, or one of each.** With b
 
 ---
 
-<img width="2545" height="1272" alt="MESH-API-v0 6 0-FINAL" src="https://github.com/user-attachments/assets/49a26e2c-c5fc-4e84-aee9-531d9d38e2bc" />
+<img width="2543" height="1271" alt="image" src="https://github.com/user-attachments/assets/d2091bab-cbdf-4b4d-b424-10d59d812f22" />
 
-The latest v0.6.0 Web-UI revamp!  NEW MAPS FEATURES AND TONS OF NEW GOODIES!
+
+The latest v0.7.4.1 Beta Web-UI!  NEW MAPS FEATURES AND TONS OF NEW GOODIES!
 
 ---
 
