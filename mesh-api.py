@@ -190,7 +190,7 @@ BANNER = (
 ╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝      ╚═╝  ╚═╝╚═╝     ╚═╝
                                                             
 
-MESH-API v0.7.4 Beta by: MR_TBOT (https://mr-tbot.com)
+MESH-API v0.7.4.1 Beta by: MR_TBOT (https://mr-tbot.com)
 https://mesh-api.dev - (https://github.com/mr-tbot/mesh-api/)
     \033[32m 
 Messaging Dashboard Access: http://localhost:5000/dashboard \033[38;5;214m
@@ -2988,12 +2988,23 @@ def dashboard():
         if meshcore_manager is not None:
             for n in meshcore_manager.get_nodes():
                 nid = n.get("id")
+                # v0.7.4.1: give MeshCore nodes the same last-heard/beacon signal
+                # as Meshtastic so "Previously Seen" hiding works for them too.
+                # last_advert (node advertisement) -> beacon_time; last_heard
+                # (newest of advert + received messages) -> lastHeard.
+                def _mc_epoch_to_utc(ep):
+                    try:
+                        if ep:
+                            return datetime.fromtimestamp(int(ep), timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC")
+                    except Exception:
+                        pass
+                    return None
                 node_gps_info[str(nid)] = {
                     "lat": n.get("lat"),
                     "lon": n.get("lon"),
-                    "beacon_time": None,
+                    "beacon_time": _mc_epoch_to_utc(n.get("last_advert")),
                     "hops": None,
-                    "lastHeard": None,
+                    "lastHeard": _mc_epoch_to_utc(n.get("last_heard")),
                     "network": "meshcore",
                     "shortName": n.get("shortName"),
                 }
@@ -3371,6 +3382,7 @@ def dashboard():
     // Globals for reply targets
     var lastDMTarget = null;
     var lastChannelTarget = null;
+    var lastChannelNetwork = null;
     let allNodes = [];
     let allMessages = [];
     // --- Emoji helpers ---
@@ -3892,19 +3904,13 @@ def dashboard():
     }
 
     function toggleMode(force) {
-      if (typeof force !== "undefined") {
-        document.getElementById('modeSwitch').checked = force === 'direct';
-      }
-      const dm = document.getElementById('modeSwitch').checked;
-      document.getElementById('dmField').style.display = dm ? 'block' : 'none';
-      document.getElementById('channelField').style.display = dm ? 'none' : 'block';
-      document.getElementById('modeLabel').textContent = dm ? 'Direct' : 'Broadcast';
+      // Legacy shim -> new tabbed Broadcast/Direct switcher (setSendMode).
+      if (force === 'direct') setSendMode('direct');
+      else if (force === 'broadcast') setSendMode('broadcast');
+      else setSendMode(_sendMode === 'direct' ? 'broadcast' : 'direct');
     }
 
     document.addEventListener("DOMContentLoaded", function() {
-      document.getElementById('modeSwitch').addEventListener('change', function() {
-        toggleMode();
-      });
       const netFilterEl = document.getElementById('nodeNetFilter');
       if (netFilterEl) {
         netFilterEl.addEventListener('change', function() { updateNodesUI(allNodes, false); });
@@ -4683,8 +4689,7 @@ def dashboard():
         const name = dest.selectedOptions[0] ? dest.selectedOptions[0].text.split(' (')[0] : '';
         document.getElementById('messageBox').value = '@' + name + ': ';
       } else {
-        const ch = document.getElementById('channelSel');
-        ch.value = target;
+        selectBroadcastChannel(target);
         document.getElementById('messageBox').value = '';
       }
       updateCharCounter();
@@ -4718,7 +4723,7 @@ def dashboard():
     function replyToLastChannel() {
       if (lastChannelTarget !== null) {
         toggleMode('broadcast');
-        document.getElementById('channelSel').value = lastChannelTarget;
+        selectBroadcastChannel(lastChannelTarget, lastChannelNetwork);
         document.getElementById('messageBox').value = '';
         updateCharCounter();
         scrollToSend();
@@ -5373,6 +5378,7 @@ def dashboard():
         allMessages = msgs;
         let nodes = await (await fetch("/nodes")).json();
         allNodes = nodes;
+        mergeLiveNodeGPS();
         checkForNewMessages(msgs);
         updateMessagesUI(msgs);
         updateNodesUI(nodes, false);
@@ -5876,12 +5882,14 @@ def dashboard():
       // Update global reply targets
       lastDMTarget = null;
       lastChannelTarget = null;
+      lastChannelNetwork = null;
       for (const m of messages) {
         if (m.direct && m.node_id != null && lastDMTarget === null) {
           lastDMTarget = m.node_id;
         }
         if (!m.direct && m.channel_idx != null && lastChannelTarget === null) {
           lastChannelTarget = m.channel_idx;
+          lastChannelNetwork = m.network || null;
         }
         if (lastDMTarget != null && lastChannelTarget != null) break;
       }
@@ -6028,6 +6036,278 @@ def dashboard():
       });
     }
 
+    // v0.7.4.1: "Previously Seen" support. Nodes not heard from within the
+    // configured window move out of the main list/map/dropdowns (unless
+    // favorited), into a collapsible "Previously Seen" section where they can
+    // still be favorited / DM'd / unhidden.
+    const STALE_HOURS_KEY = 'meshapi_stale_hours';
+    function getStaleHours() {
+      const v = parseFloat(localStorage.getItem(STALE_HOURS_KEY));
+      return (isNaN(v) || v < 0) ? 24 : v; // default 24h; 0 disables hiding
+    }
+    function setStaleHours(val) {
+      let v = parseFloat(val);
+      if (isNaN(v) || v < 0) v = 0;
+      localStorage.setItem(STALE_HOURS_KEY, String(v));
+      updateNodesUI(allNodes, false);
+      try { updateNodeMap(); } catch (e) {}
+      try { updateNodesUI(allNodes, true); } catch (e) {}
+    }
+    // Most recent time (ms) we have evidence this node was heard, from GPS
+    // beacon/lastHeard data or the latest message in the feed. null = unknown.
+    //
+    // MeshCore nodes are handled differently from Meshtastic on purpose. A
+    // Meshtastic node beacons continuously, so its lastHeard/beacon time is a
+    // reliable "still on the air" signal. MeshCore nodes do NOT beacon like
+    // that — they advert only occasionally and live in a persistent contact
+    // book, so an old advert does NOT mean the node is gone. For MeshCore we
+    // therefore consider ONLY genuine message activity (the per-node last_msg
+    // epoch + the message feed) and deliberately ignore advert / last_heard so
+    // that addressable contacts are never wrongly buried in "Previously Seen".
+    function getNodeLastHeardMs(nodeId) {
+      let best = null;
+      const consider = t => {
+        if (!t) return;
+        const ms = Date.parse(String(t).replace(' UTC', 'Z'));
+        if (!isNaN(ms)) best = (best === null) ? ms : Math.max(best, ms);
+      };
+      // Unix epoch seconds (MeshCore last_advert / last_heard from /nodes).
+      const considerEpoch = ep => {
+        if (ep == null) return;
+        const n = Number(ep);
+        if (!isNaN(n) && n > 0) { const ms = n * 1000; best = (best === null) ? ms : Math.max(best, ms); }
+      };
+      const isMeshCore = String(nodeId).startsWith('!mc-');
+      const node = (window.allNodes || []).find(x => String(x.id) === String(nodeId));
+      if (isMeshCore) {
+        // Message activity only — advert age is not a presence signal here.
+        if (node) considerEpoch(node.last_msg);
+      } else {
+        const gps = nodeGPSInfo[String(nodeId)];
+        if (gps) { consider(gps.lastHeard); consider(gps.beacon_time); }
+        if (node) { considerEpoch(node.last_heard); considerEpoch(node.last_advert); }
+      }
+      const msg = allMessages.slice().reverse().find(m => m.node_id == nodeId);
+      if (msg) consider(msg.timestamp);
+      return best;
+    }
+    // A node is "stale" (-> Previously Seen) when it's NOT favorited and we have
+    // a concrete last-heard time older than the threshold. Nodes with no known
+    // last-heard time are left visible (we can't prove they're gone).
+    function isNodeStale(nodeId) {
+      if (isFavoriteNode(nodeId)) return false;
+      const hrs = getStaleHours();
+      if (!hrs || hrs <= 0) return false; // hiding disabled
+      const ms = getNodeLastHeardMs(nodeId);
+      if (ms === null) return false;
+      return (getNowUTC() - ms) > hrs * 3600 * 1000;
+    }
+    function togglePreviouslySeen() {
+      window._prevSeenOpen = !window._prevSeenOpen;
+      const listDiv = document.getElementById('previouslySeenListDiv');
+      const icon = document.getElementById('prevSeenToggleIcon');
+      if (listDiv) listDiv.style.display = window._prevSeenOpen ? 'block' : 'none';
+      if (icon) icon.textContent = window._prevSeenOpen ? '▼' : '▶';
+    }
+    function renderPreviouslySeen(staleNodes) {
+      const wrap = document.getElementById('previouslySeenWrap');
+      const listDiv = document.getElementById('previouslySeenListDiv');
+      const countEl = document.getElementById('prevSeenCount');
+      const icon = document.getElementById('prevSeenToggleIcon');
+      if (!wrap || !listDiv) return;
+      if (!staleNodes || !staleNodes.length) {
+        wrap.style.display = 'none';
+        listDiv.innerHTML = '';
+        return;
+      }
+      wrap.style.display = 'block';
+      if (countEl) countEl.textContent = '(' + staleNodes.length + ')';
+      const open = !!window._prevSeenOpen;
+      if (icon) icon.textContent = open ? '▼' : '▶';
+      listDiv.style.display = open ? 'block' : 'none';
+      // Most recently heard first.
+      staleNodes.sort((a, b) => (getNodeLastHeardMs(b.id) || 0) - (getNodeLastHeardMs(a.id) || 0));
+      listDiv.innerHTML = '';
+      staleNodes.forEach(n => {
+        const d = buildNodeRow(n);
+        d.style.opacity = '0.7';
+        listDiv.appendChild(d);
+      });
+    }
+
+    // Build a single node row/card element (shared by the active list and the
+    // "Previously Seen" list).
+    function buildNodeRow(n) {
+      const d = document.createElement("div");
+      d.className = "nodeItem";
+      if (isRecentNode(n.id)) d.classList.add("recentNode");
+
+      // Main line: Star (favorite) + custom name or short name + ID
+      const mainLine = document.createElement("div");
+      mainLine.className = "nodeMainLine";
+      const isFav = isFavoriteNode(n.id);
+      const customName = getCustomNodeName(n.id);
+
+      const starBtn = document.createElement("span");
+      starBtn.textContent = isFav ? '⭐' : '☆';
+      starBtn.title = isFav ? 'Remove from favorites' : 'Add to favorites';
+      starBtn.style.cssText = 'cursor:pointer;margin-right:4px;font-size:1.1em;';
+      starBtn.onclick = (e) => { e.stopPropagation(); toggleFavoriteNode(n.id); };
+      mainLine.appendChild(starBtn);
+
+      if (customName) {
+        const cName = document.createElement('span');
+        cName.textContent = customName;
+        cName.style.cssText = 'color:#0ff;font-weight:bold;';
+        mainLine.appendChild(cName);
+        const origName = document.createElement('span');
+        origName.innerHTML = ` <span style="color:#888;font-size:0.85em;">(${n.shortName || ''})</span> <span style="color:#ffa500;">(${n.id})</span>`;
+        mainLine.appendChild(origName);
+      } else {
+        const nameSpan = document.createElement('span');
+        nameSpan.innerHTML = `${n.shortName || ''} <span style="color:#ffa500;">(${n.id})</span>`;
+        mainLine.appendChild(nameSpan);
+      }
+
+      // v0.7.0: network badge (Meshtastic vs MeshCore) so both are distinguishable
+      const netBadge = document.createElement('span');
+      const isMC = (n.network === 'meshcore');
+      netBadge.textContent = isMC ? 'MC' : 'MT';
+      netBadge.title = isMC ? 'MeshCore' : 'Meshtastic';
+      netBadge.style.cssText = 'margin-left:6px;font-size:0.7em;font-weight:bold;padding:1px 5px;border-radius:8px;vertical-align:middle;' +
+        (isMC ? 'background:#6a3df0;color:#fff;' : 'background:#1e88e5;color:#fff;');
+      mainLine.appendChild(netBadge);
+
+      // v0.7.2.4: MQTT badge — node is being heard over MQTT (vs direct RF)
+      if (n.via_mqtt) {
+        const mqttBadge = document.createElement('span');
+        mqttBadge.textContent = '☁ MQTT';
+        mqttBadge.title = 'Heard via MQTT (not direct RF)';
+        mqttBadge.style.cssText = 'margin-left:6px;font-size:0.7em;font-weight:bold;padding:1px 5px;border-radius:8px;vertical-align:middle;background:#00897b;color:#fff;';
+        mainLine.appendChild(mqttBadge);
+      }
+
+      const editNameBtn = document.createElement('span');
+      editNameBtn.textContent = '✏️';
+      editNameBtn.title = 'Set custom name';
+      editNameBtn.style.cssText = 'cursor:pointer;margin-left:6px;font-size:0.85em;opacity:0.6;';
+      editNameBtn.onmouseenter = () => editNameBtn.style.opacity = '1';
+      editNameBtn.onmouseleave = () => editNameBtn.style.opacity = '0.6';
+      editNameBtn.onclick = (e) => { e.stopPropagation(); promptCustomNodeName(n.id, customName); };
+      mainLine.appendChild(editNameBtn);
+
+      d.appendChild(mainLine);
+
+      // Long name (if present)
+      if (n.longName && n.longName !== n.shortName) {
+        const longName = document.createElement("div");
+        longName.className = "nodeLongName";
+        longName.textContent = n.longName;
+        d.appendChild(longName);
+      }
+
+      // Info line 1: DM button (always), GPS/map, distance
+      const infoLine1 = document.createElement("div");
+      infoLine1.className = "nodeInfoLine";
+      let gps = nodeGPSInfo[String(n.id)];
+
+      // DM button - always available for all nodes
+      const dmBtn = document.createElement("button");
+      dmBtn.textContent = "💬 DM";
+      dmBtn.className = "reply-btn";
+      dmBtn.onclick = () => dmToNode(n.id, n.shortName || n.longName || n.id);
+      infoLine1.appendChild(dmBtn);
+
+      // PING button
+      const pingBtn = document.createElement("button");
+      pingBtn.textContent = "📡 PING";
+      pingBtn.className = "reply-btn";
+      pingBtn.title = "Send /PING to this node";
+      pingBtn.onclick = () => sendPingToNode(n.id, n.shortName || n.longName || n.id);
+      infoLine1.appendChild(pingBtn);
+
+      // PONG button
+      const pongBtn = document.createElement("button");
+      pongBtn.textContent = "🏓 PONG";
+      pongBtn.className = "reply-btn";
+      pongBtn.title = "Send /PONG to this node";
+      pongBtn.onclick = () => sendPongToNode(n.id, n.shortName || n.longName || n.id);
+      infoLine1.appendChild(pongBtn);
+
+      if (gps && gps.lat != null && gps.lon != null) {
+        // Map buttons container - keep Show on Map and Google Maps on same line
+        const mapBtns = document.createElement("span");
+        mapBtns.style.cssText = "display:inline-flex;gap:6px;align-items:center;";
+
+        // Show on Map button - fly to node on the Leaflet map
+        const showMapBtn = document.createElement("button");
+        showMapBtn.textContent = "📍 Show on Map";
+        showMapBtn.className = "reply-btn";
+        showMapBtn.title = "Highlight this node on the map";
+        showMapBtn.onclick = () => flyToNode(n.id);
+        mapBtns.appendChild(showMapBtn);
+
+        // Google Maps link
+        const mapA = document.createElement("a");
+        mapA.href = `https://www.google.com/maps/search/?api=1&query=${gps.lat},${gps.lon}`;
+        mapA.target = "_blank";
+        mapA.className = "nodeMapBtn";
+        mapA.title = "Open in Google Maps";
+        mapA.innerHTML = "🗺️ Google Maps";
+        mapBtns.appendChild(mapA);
+
+        infoLine1.appendChild(mapBtns);
+
+        // Distance
+        let effectiveGPS = getEffectiveMyGPS();
+        if (effectiveGPS && effectiveGPS.lat != null && effectiveGPS.lon != null) {
+          let dist = calcDistance(effectiveGPS.lat, effectiveGPS.lon, gps.lat, gps.lon);
+          if (dist < 99999) {
+            const distSpan = document.createElement("span");
+            distSpan.className = "nodeGPS";
+            distSpan.title = "Approximate distance";
+            distSpan.innerHTML = `📏 ${dist.toFixed(2)} km`;
+            infoLine1.appendChild(distSpan);
+          }
+        }
+      }
+      d.appendChild(infoLine1);
+
+      // Info line 2: Hops
+      const infoLine3 = document.createElement("div");
+      infoLine3.className = "nodeInfoLine";
+      // Only show hops if available and not null/undefined/""
+      if (gps && gps.hops != null && gps.hops !== "" && gps.hops !== undefined) {
+        const hops = document.createElement("span");
+        hops.className = "nodeHops";
+        hops.title = "Hops from this node";
+        hops.innerHTML = `⛓️ ${gps.hops} hop${gps.hops==1?"":"s"}`;
+        infoLine3.appendChild(hops);
+        d.appendChild(infoLine3);
+      }
+      // If hops is not available, do not show this section at all
+
+      // Info line 3 (last): Beacon/reporting time and last heard
+      const infoLine2 = document.createElement("div");
+      infoLine2.className = "nodeInfoLine";
+      if (gps && gps.lastHeard) {
+        const lastHeard = document.createElement("span");
+        lastHeard.className = "nodeBeacon";
+        lastHeard.title = "Last heard from this node";
+        lastHeard.innerHTML = `📡 Last heard: ${getTZAdjusted(gps.lastHeard)}`;
+        infoLine2.appendChild(lastHeard);
+      }
+      if (gps && gps.beacon_time) {
+        const beacon = document.createElement("span");
+        beacon.className = "nodeBeacon";
+        beacon.title = "Last beacon/reporting time";
+        beacon.innerHTML = `🕒 Beacon: ${getTZAdjusted(gps.beacon_time)}`;
+        infoLine2.appendChild(beacon);
+      }
+      d.appendChild(infoLine2);
+      return d;
+    }
+
     function updateNodesUI(nodes, isDest) {
       // isDest: false = available nodes panel, true = destination node dropdown
       if (!isDest) {
@@ -6042,11 +6322,15 @@ def dashboard():
           (n.longName && n.longName.toLowerCase().includes(filter)) ||
           String(n.id).toLowerCase().includes(filter))
         );
+        // v0.7.4.1: split nodes not heard from recently (and not favorited) into
+        // a separate "Previously Seen" section; keep the rest in the main list.
+        const activeNodes = filtered.filter(n => !isNodeStale(n.id));
+        const staleNodes  = filtered.filter(n => isNodeStale(n.id));
         // Sort: group by network (Meshtastic first, then MeshCore), each
         // group internally ordered by the chosen sort. This yields separate
         // on-screen sections per network.
         const netRank = n => ((n.network || 'meshtastic') === 'meshcore' ? 1 : 0);
-        filtered.sort((a, b) => {
+        activeNodes.sort((a, b) => {
           const r = netRank(a) - netRank(b);
           if (r !== 0) return r;
           return compareNodes(a, b);
@@ -6061,7 +6345,7 @@ def dashboard():
           const hdr = document.createElement('div');
           hdr.className = 'nodeNetSection';
           hdr.dataset.net = net;
-          const count = filtered.filter(x => (x.network || 'meshtastic') === net).length;
+          const count = activeNodes.filter(x => (x.network || 'meshtastic') === net).length;
           hdr.innerHTML = `<span class="nodeNetToggle" style="display:inline-block;width:14px;">${collapsed ? '▶' : '▼'}</span>` +
             `<span style="font-size:1.05em;">${isMC ? '🟣 MeshCore' : '📡 Meshtastic'}</span>` +
             ` <span style="opacity:0.7;font-size:0.85em;">(${count})</span>`;
@@ -6076,189 +6360,26 @@ def dashboard():
           list.appendChild(hdr);
         }
 
-        filtered.forEach(n => {
+        activeNodes.forEach(n => {
           const thisNet = (n.network || 'meshtastic');
           if (thisNet !== lastNet) { addNetSection(thisNet); lastNet = thisNet; }
           if (window._nodeNetCollapsed[thisNet]) return; // section collapsed
-          const d = document.createElement("div");
-          d.className = "nodeItem";
-          if (isRecentNode(n.id)) d.classList.add("recentNode");
-
-          // Main line: Star (favorite) + custom name or short name + ID
-          const mainLine = document.createElement("div");
-          mainLine.className = "nodeMainLine";
-          const isFav = isFavoriteNode(n.id);
-          const customName = getCustomNodeName(n.id);
-
-          const starBtn = document.createElement("span");
-          starBtn.textContent = isFav ? '⭐' : '☆';
-          starBtn.title = isFav ? 'Remove from favorites' : 'Add to favorites';
-          starBtn.style.cssText = 'cursor:pointer;margin-right:4px;font-size:1.1em;';
-          starBtn.onclick = (e) => { e.stopPropagation(); toggleFavoriteNode(n.id); };
-          mainLine.appendChild(starBtn);
-
-          if (customName) {
-            const cName = document.createElement('span');
-            cName.textContent = customName;
-            cName.style.cssText = 'color:#0ff;font-weight:bold;';
-            mainLine.appendChild(cName);
-            const origName = document.createElement('span');
-            origName.innerHTML = ` <span style="color:#888;font-size:0.85em;">(${n.shortName || ''})</span> <span style="color:#ffa500;">(${n.id})</span>`;
-            mainLine.appendChild(origName);
-          } else {
-            const nameSpan = document.createElement('span');
-            nameSpan.innerHTML = `${n.shortName || ''} <span style="color:#ffa500;">(${n.id})</span>`;
-            mainLine.appendChild(nameSpan);
-          }
-
-          // v0.7.0: network badge (Meshtastic vs MeshCore) so both are distinguishable
-          const netBadge = document.createElement('span');
-          const isMC = (n.network === 'meshcore');
-          netBadge.textContent = isMC ? 'MC' : 'MT';
-          netBadge.title = isMC ? 'MeshCore' : 'Meshtastic';
-          netBadge.style.cssText = 'margin-left:6px;font-size:0.7em;font-weight:bold;padding:1px 5px;border-radius:8px;vertical-align:middle;' +
-            (isMC ? 'background:#6a3df0;color:#fff;' : 'background:#1e88e5;color:#fff;');
-          mainLine.appendChild(netBadge);
-
-          // v0.7.2.4: MQTT badge — node is being heard over MQTT (vs direct RF)
-          if (n.via_mqtt) {
-            const mqttBadge = document.createElement('span');
-            mqttBadge.textContent = '☁ MQTT';
-            mqttBadge.title = 'Heard via MQTT (not direct RF)';
-            mqttBadge.style.cssText = 'margin-left:6px;font-size:0.7em;font-weight:bold;padding:1px 5px;border-radius:8px;vertical-align:middle;background:#00897b;color:#fff;';
-            mainLine.appendChild(mqttBadge);
-          }
-
-          const editNameBtn = document.createElement('span');
-          editNameBtn.textContent = '✏️';
-          editNameBtn.title = 'Set custom name';
-          editNameBtn.style.cssText = 'cursor:pointer;margin-left:6px;font-size:0.85em;opacity:0.6;';
-          editNameBtn.onmouseenter = () => editNameBtn.style.opacity = '1';
-          editNameBtn.onmouseleave = () => editNameBtn.style.opacity = '0.6';
-          editNameBtn.onclick = (e) => { e.stopPropagation(); promptCustomNodeName(n.id, customName); };
-          mainLine.appendChild(editNameBtn);
-
-          d.appendChild(mainLine);
-
-          // Long name (if present)
-          if (n.longName && n.longName !== n.shortName) {
-            const longName = document.createElement("div");
-            longName.className = "nodeLongName";
-            longName.textContent = n.longName;
-            d.appendChild(longName);
-          }
-
-          // Info line 1: DM button (always), GPS/map, distance
-          const infoLine1 = document.createElement("div");
-          infoLine1.className = "nodeInfoLine";
-          let gps = nodeGPSInfo[String(n.id)];
-
-          // DM button - always available for all nodes
-          const dmBtn = document.createElement("button");
-          dmBtn.textContent = "💬 DM";
-          dmBtn.className = "reply-btn";
-          dmBtn.onclick = () => dmToNode(n.id, n.shortName || n.longName || n.id);
-          infoLine1.appendChild(dmBtn);
-
-          // PING button
-          const pingBtn = document.createElement("button");
-          pingBtn.textContent = "📡 PING";
-          pingBtn.className = "reply-btn";
-          pingBtn.title = "Send /PING to this node";
-          pingBtn.onclick = () => sendPingToNode(n.id, n.shortName || n.longName || n.id);
-          infoLine1.appendChild(pingBtn);
-
-          // PONG button
-          const pongBtn = document.createElement("button");
-          pongBtn.textContent = "🏓 PONG";
-          pongBtn.className = "reply-btn";
-          pongBtn.title = "Send /PONG to this node";
-          pongBtn.onclick = () => sendPongToNode(n.id, n.shortName || n.longName || n.id);
-          infoLine1.appendChild(pongBtn);
-
-          if (gps && gps.lat != null && gps.lon != null) {
-            // Map buttons container - keep Show on Map and Google Maps on same line
-            const mapBtns = document.createElement("span");
-            mapBtns.style.cssText = "display:inline-flex;gap:6px;align-items:center;";
-
-            // Show on Map button - fly to node on the Leaflet map
-            const showMapBtn = document.createElement("button");
-            showMapBtn.textContent = "📍 Show on Map";
-            showMapBtn.className = "reply-btn";
-            showMapBtn.title = "Highlight this node on the map";
-            showMapBtn.onclick = () => flyToNode(n.id);
-            mapBtns.appendChild(showMapBtn);
-
-            // Google Maps link
-            const mapA = document.createElement("a");
-            mapA.href = `https://www.google.com/maps/search/?api=1&query=${gps.lat},${gps.lon}`;
-            mapA.target = "_blank";
-            mapA.className = "nodeMapBtn";
-            mapA.title = "Open in Google Maps";
-            mapA.innerHTML = "🗺️ Google Maps";
-            mapBtns.appendChild(mapA);
-
-            infoLine1.appendChild(mapBtns);
-
-            // Distance
-            let effectiveGPS = getEffectiveMyGPS();
-            if (effectiveGPS && effectiveGPS.lat != null && effectiveGPS.lon != null) {
-              let dist = calcDistance(effectiveGPS.lat, effectiveGPS.lon, gps.lat, gps.lon);
-              if (dist < 99999) {
-                const distSpan = document.createElement("span");
-                distSpan.className = "nodeGPS";
-                distSpan.title = "Approximate distance";
-                distSpan.innerHTML = `📏 ${dist.toFixed(2)} km`;
-                infoLine1.appendChild(distSpan);
-              }
-            }
-          }
-          d.appendChild(infoLine1);
-
-          // Info line 2: Hops
-          const infoLine3 = document.createElement("div");
-          infoLine3.className = "nodeInfoLine";
-          // Only show hops if available and not null/undefined/""
-          if (gps && gps.hops != null && gps.hops !== "" && gps.hops !== undefined) {
-            const hops = document.createElement("span");
-            hops.className = "nodeHops";
-            hops.title = "Hops from this node";
-            hops.innerHTML = `⛓️ ${gps.hops} hop${gps.hops==1?"":"s"}`;
-            infoLine3.appendChild(hops);
-            d.appendChild(infoLine3);
-          }
-          // If hops is not available, do not show this section at all
-
-          // Info line 3 (last): Beacon/reporting time and last heard
-          const infoLine2 = document.createElement("div");
-          infoLine2.className = "nodeInfoLine";
-          if (gps && gps.lastHeard) {
-            const lastHeard = document.createElement("span");
-            lastHeard.className = "nodeBeacon";
-            lastHeard.title = "Last heard from this node";
-            lastHeard.innerHTML = `📡 Last heard: ${getTZAdjusted(gps.lastHeard)}`;
-            infoLine2.appendChild(lastHeard);
-          }
-          if (gps && gps.beacon_time) {
-            const beacon = document.createElement("span");
-            beacon.className = "nodeBeacon";
-            beacon.title = "Last beacon/reporting time";
-            beacon.innerHTML = `🕒 Beacon: ${getTZAdjusted(gps.beacon_time)}`;
-            infoLine2.appendChild(beacon);
-          }
-          d.appendChild(infoLine2);
-
+          const d = buildNodeRow(n);
           list.appendChild(d);
         });
+
+        // Render the "Previously Seen" section (stale, non-favorited nodes).
+        renderPreviouslySeen(staleNodes);
       } else {
         const sel  = document.getElementById("destNode");
         const prevNode = sel.value;
         sel.innerHTML  = "<option value=''>--Select Node--</option>";
         let filter = document.getElementById('destNodeSearch').value.toLowerCase();
         let filtered = nodes.filter(n =>
+          !isNodeStale(n.id) && (
           (n.shortName && n.shortName.toLowerCase().includes(filter)) ||
           (n.longName && n.longName.toLowerCase().includes(filter)) ||
-          String(n.id).toLowerCase().includes(filter)
+          String(n.id).toLowerCase().includes(filter))
         );
         filtered.forEach(n => {
           const opt = document.createElement("option");
@@ -6410,15 +6531,28 @@ def dashboard():
     // mapped until a manual refresh. This keeps the map live for both networks.
     function mergeLiveNodeGPS() {
       if (!Array.isArray(allNodes)) return;
+      // Convert a unix epoch (seconds) to the "YYYY-MM-DD HH:MM:SS UTC" format
+      // used elsewhere in nodeGPSInfo, so live MeshCore data displays/sorts the
+      // same as the server-rendered Meshtastic data.
+      const epochToUtc = ep => {
+        const n = Number(ep);
+        if (!ep || isNaN(n) || n <= 0) return null;
+        return new Date(n * 1000).toISOString().replace('T', ' ').replace(/[.][0-9]+Z$/, ' UTC');
+      };
       for (const n of allNodes) {
-        if (n == null || n.lat == null || n.lon == null) continue;
+        if (n == null) continue;
         const key = String(n.id);
         const prev = nodeGPSInfo[key] || {};
-        nodeGPSInfo[key] = Object.assign({}, prev, {
-          lat: n.lat,
-          lon: n.lon,
+        const merged = Object.assign({}, prev, {
           network: n.network || prev.network || 'meshtastic',
         });
+        if (n.lat != null && n.lon != null) { merged.lat = n.lat; merged.lon = n.lon; }
+        // MeshCore last-heard/advert epochs -> keep nodeGPSInfo fresh between reloads.
+        const lh = epochToUtc(n.last_heard);
+        if (lh) merged.lastHeard = lh;
+        const adv = epochToUtc(n.last_advert);
+        if (adv) merged.beacon_time = adv;
+        nodeGPSInfo[key] = merged;
       }
     }
     function updateNodeMap() {
@@ -6442,6 +6576,8 @@ def dashboard():
           if (mapFilter === 'favorites' && !isFav) continue;
           if (mapFilter === 'meshtastic' && isMC) continue;
           if (mapFilter === 'meshcore' && !isMC) continue;
+          // v0.7.4.1: hide "Previously Seen" (stale, non-favorited) nodes from the map.
+          if (isNodeStale(nid)) continue;
           let name = node ? (node.shortName || nid) : nid;
           let longName = node && node.longName ? node.longName : '';
           let cName = getCustomNodeName(nid);
@@ -6660,14 +6796,13 @@ def dashboard():
       fetch("/api/networks")
         .then(r => r.json())
         .then(d => {
-          const mtOn = d.meshtastic && d.meshtastic.enabled;
-          const mcOn = d.meshcore && (d.meshcore.enabled || d.meshcore.connected);
-          const field = document.getElementById('networkField');
-          // Only show the network picker when both radios are in play.
-          if (field) field.style.display = (mtOn && mcOn) ? 'block' : 'none';
-          const sel = document.getElementById('networkSel');
-          if (sel && !(mtOn && mcOn)) {
-            sel.value = mcOn && !mtOn ? 'meshcore' : 'meshtastic';
+          const mtOn = !!(d.meshtastic && d.meshtastic.enabled);
+          const mcOn = !!(d.meshcore && (d.meshcore.enabled || d.meshcore.connected));
+          // v0.7.4.1: feed the unified "Broadcast to" selector. Rebuild its
+          // options only when the set of active radios actually changes.
+          if (_sendNetState.mt !== mtOn || _sendNetState.mc !== mcOn) {
+            _sendNetState = { mt: mtOn, mc: mcOn };
+            refreshBroadcastChannels();
           }
           const badge = document.getElementById('networksBadge');
           if (badge) {
@@ -7002,36 +7137,228 @@ def dashboard():
         }).catch(e => { list.innerHTML = '<div style="color:#e53935;">Error: ' + e + '</div>'; });
     }
 
-    // v0.7.0: when MeshCore (or Both) is the send target, offer MeshCore's own
-    // channels (group chats / private channels) in the channel dropdown.
-    let meshtasticChannelHTML = null;
-    function refreshChannelOptionsForNetwork() {
-      const sel = document.getElementById('networkSel');
-      const chan = document.getElementById('channelSel');
+    // v0.7.4.1 (revamp): the Send box has a Broadcast / Direct mode and, in
+    // Broadcast mode, an independent per-network picker. The user ticks any of
+    // 📡 Meshtastic / 🟣 MeshCore / 🌉 Bridged and chooses a channel for each
+    // ticked network; one Send fans the message out to every ticked target.
+    let _mtChannels = null;            // snapshot of server-rendered Meshtastic channels
+    let _mcChannelsCache = [];         // last-known MeshCore channels
+    let _sendNetState = { mt: true, mc: false };
+    let _sendMode = 'broadcast';
+    function snapshotMtChannels() {
+      if (_mtChannels) return;
+      const chan = document.getElementById('mtChannelSel');
       if (!chan) return;
-      if (meshtasticChannelHTML === null) meshtasticChannelHTML = chan.innerHTML; // snapshot MT channels
-      const net = sel ? sel.value : 'auto';
-      if (net === 'meshcore') {
+      _mtChannels = [...chan.querySelectorAll('option')].map(o => {
+        const m = o.textContent.match(/([0-9]+) *- *(.+)$/);
+        return { index: parseInt(o.value, 10), name: m ? m[2].trim() : ('Channel ' + o.value) };
+      });
+    }
+    function setSendMode(mode) {
+      _sendMode = (mode === 'direct') ? 'direct' : 'broadcast';
+      const bcast = document.getElementById('broadcastPanel');
+      const direct = document.getElementById('directPanel');
+      const bBtn = document.getElementById('modeBtnBroadcast');
+      const dBtn = document.getElementById('modeBtnDirect');
+      if (bcast) bcast.style.display = (_sendMode === 'broadcast') ? 'block' : 'none';
+      if (direct) direct.style.display = (_sendMode === 'direct') ? 'block' : 'none';
+      const on = 'background:var(--theme-color); color:#000;';
+      const off = 'background:transparent; color:var(--theme-color);';
+      const base = 'flex:1; padding:8px; border-radius:8px; border:1px solid var(--theme-color); font-weight:bold; cursor:pointer;';
+      if (bBtn) bBtn.style.cssText = base + (_sendMode === 'broadcast' ? on : off);
+      if (dBtn) dBtn.style.cssText = base + (_sendMode === 'direct' ? on : off);
+      if (_sendMode === 'direct') _updateDmNetHint(); else _updateBroadcastHint();
+    }
+    // Apply the active-radio state to the broadcast picker: show only the rows
+    // for radios that exist, keep at least one network ticked, and reveal the
+    // Bridged option only when BOTH radios are present.
+    function applyBroadcastNetRows() {
+      const mt = _sendNetState.mt, mc = _sendNetState.mc;
+      const rowMt = document.getElementById('netRowMt');
+      const rowMc = document.getElementById('netRowMc');
+      const rowBr = document.getElementById('netRowBridge');
+      const chkMt = document.getElementById('netChkMt');
+      const chkMc = document.getElementById('netChkMc');
+      const chkBr = document.getElementById('netChkBridge');
+      if (rowMt) rowMt.style.display = mt ? 'flex' : 'none';
+      if (rowMc) rowMc.style.display = mc ? 'flex' : 'none';
+      if (rowBr) rowBr.style.display = (mt && mc) ? 'flex' : 'none';
+      // Don't let a hidden network stay ticked.
+      if (chkMt && !mt) chkMt.checked = false;
+      if (chkMc && !mc) chkMc.checked = false;
+      if (chkBr && !(mt && mc)) chkBr.checked = false;
+      // Guarantee at least one ticked network so Send always has a target.
+      if (chkMt && chkMc && chkBr &&
+          !chkMt.checked && !chkMc.checked && !chkBr.checked) {
+        if (mt) chkMt.checked = true; else if (mc) chkMc.checked = true;
+      }
+      onNetCheckChange();
+    }
+    function onNetCheckChange() {
+      const chkMt = document.getElementById('netChkMt');
+      const chkMc = document.getElementById('netChkMc');
+      const chkBr = document.getElementById('netChkBridge');
+      const selMt = document.getElementById('mtChannelSel');
+      const selMc = document.getElementById('mcChannelSel');
+      const selBr = document.getElementById('bridgeChannelSel');
+      if (selMt) selMt.disabled = !(chkMt && chkMt.checked);
+      if (selMc) selMc.disabled = !(chkMc && chkMc.checked);
+      if (selBr) selBr.disabled = !(chkBr && chkBr.checked);
+      [['netChkMt','mtChannelSel'],['netChkMc','mcChannelSel'],['netChkBridge','bridgeChannelSel']].forEach(([c,s]) => {
+        const chk = document.getElementById(c), sel = document.getElementById(s);
+        if (sel) sel.style.opacity = (chk && chk.checked) ? '1' : '0.45';
+      });
+      _updateBroadcastHint();
+    }
+    function _updateBroadcastHint() {
+      const hint = document.getElementById('broadcastHint');
+      if (!hint) return;
+      const targets = collectBroadcastTargets();
+      if (!targets.length) { hint.textContent = '⚠️ Tick at least one network to broadcast.'; hint.style.color = '#e53935'; return; }
+      hint.style.color = '#888';
+      const parts = targets.map(t => {
+        if (t.net === 'meshtastic') return '📡 MT ch ' + t.idx;
+        if (t.net === 'meshcore') return '🟣 MC ch ' + t.idx;
+        return '🌉 both ch ' + t.idx;
+      });
+      hint.textContent = 'Will send to: ' + parts.join('  ·  ');
+    }
+    // Build the list of selected broadcast targets from the ticked networks.
+    function collectBroadcastTargets() {
+      const out = [];
+      const chkMt = document.getElementById('netChkMt');
+      const chkMc = document.getElementById('netChkMc');
+      const chkBr = document.getElementById('netChkBridge');
+      const selMt = document.getElementById('mtChannelSel');
+      const selMc = document.getElementById('mcChannelSel');
+      const selBr = document.getElementById('bridgeChannelSel');
+      if (_sendNetState.mt && chkMt && chkMt.checked && selMt && selMt.value !== '')
+        out.push({ net: 'meshtastic', idx: parseInt(selMt.value, 10) });
+      if (_sendNetState.mc && chkMc && chkMc.checked && selMc && selMc.value !== '')
+        out.push({ net: 'meshcore', idx: parseInt(selMc.value, 10) });
+      if (_sendNetState.mt && _sendNetState.mc && chkBr && chkBr.checked && selBr && selBr.value !== '')
+        out.push({ net: 'both', idx: parseInt(selBr.value, 10) });
+      return out;
+    }
+    // (Re)populate the MeshCore channel dropdown from the radio, then refresh UI.
+    function refreshBroadcastChannels(force) {
+      snapshotMtChannels();
+      if (_sendNetState.mc) {
         fetch('/api/meshcore/channels').then(r => r.json()).then(chs => {
-          if (!Array.isArray(chs) || !chs.length) return;
-          const cur = chan.value;
-          chan.innerHTML = chs.map(c => `<option value="${c.index}">${c.index} - ${c.name}</option>`).join('');
-          if ([...chan.options].some(o => o.value === cur)) chan.value = cur;
-        }).catch(() => {});
+          if (Array.isArray(chs)) _mcChannelsCache = chs;
+          _renderMcChannelOptions();
+          _renderBridgeChannelOptions();
+          applyBroadcastNetRows();
+        }).catch(() => { _renderMcChannelOptions(); _renderBridgeChannelOptions(); applyBroadcastNetRows(); });
       } else {
-        // Meshtastic / Both / Auto -> show Meshtastic channels (the bridge maps them)
-        if (chan.innerHTML !== meshtasticChannelHTML) chan.innerHTML = meshtasticChannelHTML;
+        _mcChannelsCache = [];
+        _renderMcChannelOptions();
+        _renderBridgeChannelOptions();
+        applyBroadcastNetRows();
       }
     }
+    function _renderMcChannelOptions() {
+      const sel = document.getElementById('mcChannelSel');
+      if (!sel) return;
+      const prev = sel.value;
+      const chs = _mcChannelsCache || [];
+      sel.innerHTML = chs.length
+        ? chs.map(c => `<option value="${c.index}">${c.index} - ${c.name}</option>`).join('')
+        : '<option value="">(no MeshCore channels)</option>';
+      if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+    }
+    // The Bridged dropdown routes the SAME channel index to both networks, so
+    // each option spells out BOTH destinations: the Meshtastic channel name and
+    // the MeshCore channel name for that index (e.g. "2 → 📡 BOT_CHAT + 🟣 Channel 2").
+    function _renderBridgeChannelOptions() {
+      const sel = document.getElementById('bridgeChannelSel');
+      if (!sel) return;
+      snapshotMtChannels();
+      const prev = sel.value;
+      const mtCh = _mtChannels || [];
+      const mcByIdx = {};
+      (_mcChannelsCache || []).forEach(c => { mcByIdx[c.index] = c.name; });
+      if (!mtCh.length) return; // keep server-rendered fallback if snapshot missing
+      sel.innerHTML = mtCh.map(c => {
+        const mcName = (mcByIdx[c.index] != null) ? mcByIdx[c.index] : ('Channel ' + c.index);
+        return `<option value="${c.index}">${c.index} → 📡 ${c.name} + 🟣 ${mcName}</option>`;
+      }).join('');
+      if (prev && [...sel.options].some(o => o.value === prev)) sel.value = prev;
+    }
+    // Select a broadcast channel for a network (used by reply buttons). Ticks
+    // that network, switches to broadcast mode, and sets its dropdown.
+    function selectBroadcastChannel(idx, network) {
+      setSendMode('broadcast');
+      let chkId, selId;
+      if (network === 'meshcore') { chkId = 'netChkMc'; selId = 'mcChannelSel'; }
+      else if (network === 'both') { chkId = 'netChkBridge'; selId = 'bridgeChannelSel'; }
+      else { chkId = 'netChkMt'; selId = 'mtChannelSel'; }
+      const chk = document.getElementById(chkId);
+      const sel = document.getElementById(selId);
+      if (chk && chk.closest('.net-row') && chk.closest('.net-row').style.display !== 'none') chk.checked = true;
+      if (sel && [...sel.options].some(o => o.value === String(idx))) sel.value = String(idx);
+      onNetCheckChange();
+    }
+    function _updateDmNetHint() {
+      const dest = document.getElementById('destNode');
+      const hint = document.getElementById('dmNetHint');
+      if (!dest || !hint) return;
+      const v = dest.value || '';
+      if (!v) { hint.textContent = ''; return; }
+      hint.textContent = String(v).startsWith('!mc-') ? '🟣 Direct message via MeshCore.' : '📡 Direct message via Meshtastic.';
+    }
+    function showSendStatus(msg, isError) {
+      const el = document.getElementById('sendStatus');
+      if (!el) return;
+      el.textContent = msg || '';
+      el.style.color = isError ? '#e53935' : '#4caf50';
+    }
+    function submitSendForm(ev) {
+      if (ev) ev.preventDefault();
+      const msg = document.getElementById('messageBox').value.trim();
+      if (!msg) { showSendStatus('Enter a message first.', true); return false; }
+      let body;
+      if (_sendMode === 'direct') {
+        const dest = document.getElementById('destNode').value;
+        if (!dest) { showSendStatus('Select a destination node.', true); return false; }
+        body = 'message=' + encodeURIComponent(msg) + '&destination_node=' + encodeURIComponent(dest);
+      } else {
+        const targets = collectBroadcastTargets();
+        if (!targets.length) { showSendStatus('Tick at least one network to broadcast.', true); return false; }
+        // Encode as a comma-separated list of "<net>:<idx>" tokens (mt/mc/both).
+        const tokens = targets.map(t => {
+          const pfx = t.net === 'meshcore' ? 'mc' : t.net === 'both' ? 'both' : 'mt';
+          return pfx + ':' + t.idx;
+        });
+        body = 'message=' + encodeURIComponent(msg) + '&targets=' + encodeURIComponent(tokens.join(','));
+      }
+      showSendStatus('Sending…', false);
+      fetch('/ui_send', { method: 'POST', headers: { 'Content-Type': 'application/x-www-form-urlencoded' }, body })
+        .then(r => {
+          if (r.ok || r.redirected) {
+            document.getElementById('messageBox').value = '';
+            updateCharCounter();
+            showSendStatus('✓ Sent', false);
+            setTimeout(() => showSendStatus('', false), 2500);
+            fetchMessagesAndNodes();
+          } else { showSendStatus('Send failed (' + r.status + ')', true); }
+        })
+        .catch(e => showSendStatus('Error: ' + e, true));
+      return false;
+    }
     (function(){
-      const sel = document.getElementById('networkSel');
-      if (sel) sel.addEventListener('change', refreshChannelOptionsForNetwork);
+      ['mtChannelSel','mcChannelSel','bridgeChannelSel'].forEach(id => {
+        const el = document.getElementById(id);
+        if (el) el.addEventListener('change', _updateBroadcastHint);
+      });
+      const dest = document.getElementById('destNode');
+      if (dest) dest.addEventListener('change', _updateDmNetHint);
     })();
 
     function onPageLoad() {
       setInterval(fetchMessagesAndNodes, 10000);
       fetchMessagesAndNodes();
-      toggleMode(); // Set initial mode
+      setSendMode('broadcast'); // Set initial mode
       // Populate quick emoji bar
       const bar = document.getElementById('quickEmojiBar');
       if (bar) {
@@ -7072,6 +7399,10 @@ def dashboard():
         });
       }
       initCharChunkCounter();
+      snapshotMtChannels();
+      refreshBroadcastChannels();
+      const _sh = document.getElementById('staleHoursInput');
+      if (_sh) _sh.value = getStaleHours();
     }
   window.addEventListener("load", () => { onPageLoad(); pollStatus(); });
 
@@ -7544,43 +7875,54 @@ def dashboard():
       <h2><span class="drag-handle" title="Drag to reorder">&#x2630;</span> ✉️ Send a Message <span id="networksBadge" style="display:none; font-size:12px; margin-left:8px; padding:2px 8px; border:1px solid var(--theme-color); border-radius:10px; vertical-align:middle;"></span></h2>
       <button class="section-hide-btn" onclick="hideSection('sendForm')" title="Hide this section">✕</button>
     </div>
-    <form method="POST" action="/ui_send">
-  <div id="networkField" style="display:none;">
-    <label>Network:</label>
-    <select id="networkSel" name="network">
-      <option value="auto">Auto (active radios)</option>
-      <option value="meshtastic">Meshtastic</option>
-      <option value="meshcore">MeshCore</option>
-      <option value="both">Both networks</option>
-    </select><br><br>
-  </div>
-  <label>Message Mode:</label>
-      <label class="switch">
-        <input type="checkbox" id="modeSwitch">
-        <span class="slider round"></span>
-      </label>
-      <span id="modeLabel">Broadcast</span><br><br>
-
-      <div id="dmField" style="display:none;">
-        <label>Destination Node:</label><br>
-        <input type="text" id="destNodeSearch" placeholder="Search destination nodes..."><br>
-        <select id="destNode" name="destination_node"></select><br><br>
+    <form id="sendMsgForm" method="POST" action="/ui_send" onsubmit="return submitSendForm(event)">
+      <div id="sendModeRow" style="display:flex; gap:8px; margin-bottom:12px;">
+        <button type="button" id="modeBtnBroadcast" onclick="setSendMode('broadcast')" style="flex:1; padding:8px; border-radius:8px; border:1px solid var(--theme-color); background:var(--theme-color); color:#000; font-weight:bold; cursor:pointer;">📢 Broadcast</button>
+        <button type="button" id="modeBtnDirect" onclick="setSendMode('direct')" style="flex:1; padding:8px; border-radius:8px; border:1px solid var(--theme-color); background:transparent; color:var(--theme-color); font-weight:bold; cursor:pointer;">✉️ Direct Message</button>
       </div>
 
-      <div id="channelField" style="display:block;">
-        <label>Channel:</label><br>
-        <select id="channelSel" name="channel_index">
+      <div id="broadcastPanel">
+        <label style="font-weight:bold;">Broadcast to:</label>
+        <div style="font-size:11px; color:#888; margin:2px 0 6px;">Tick each network you want to broadcast on, then pick a channel for it.</div>
+        <div id="broadcastNetPicker" style="display:flex; flex-direction:column; gap:8px; margin:8px 0;">
+          <div id="netRowMt" class="net-row" style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
+            <label style="display:inline-flex; align-items:center; gap:5px; min-width:150px; cursor:pointer; user-select:none;"><input type="checkbox" id="netChkMt" checked onchange="onNetCheckChange()"> 📡 Meshtastic</label>
+            <select id="mtChannelSel" style="flex:1; min-width:160px;">
 """
     for i in range(8):
         name = channel_names.get(str(i), f"Channel {i}")
-        html += f"          <option value='{i}'>{i} - {name}</option>\n"
-    html += """        </select><br><br>
+        html += f"              <option value='{i}'>{i} - {name}</option>\n"
+    html += """            </select>
+          </div>
+          <div id="netRowMc" class="net-row" style="display:none; align-items:center; gap:8px; flex-wrap:wrap;">
+            <label style="display:inline-flex; align-items:center; gap:5px; min-width:150px; cursor:pointer; user-select:none;"><input type="checkbox" id="netChkMc" onchange="onNetCheckChange()"> 🟣 MeshCore</label>
+            <select id="mcChannelSel" style="flex:1; min-width:160px;"></select>
+          </div>
+          <div id="netRowBridge" class="net-row" style="display:none; align-items:center; gap:8px; flex-wrap:wrap;">
+            <label style="display:inline-flex; align-items:center; gap:5px; min-width:150px; cursor:pointer; user-select:none;" title="Send to the same channel index on BOTH Meshtastic and MeshCore at once"><input type="checkbox" id="netChkBridge" onchange="onNetCheckChange()"> 🌉 Bridged (both)</label>
+            <select id="bridgeChannelSel" style="flex:1; min-width:160px;">
+"""
+    for i in range(8):
+        name = channel_names.get(str(i), f"Channel {i}")
+        html += f"              <option value='{i}'>{i} - {name}</option>\n"
+    html += """            </select>
+          </div>
+        </div>
+        <div id="broadcastHint" style="font-size:11px; color:#888; margin-top:4px;"></div>
       </div>
 
-      <label>Message:</label><br>
+      <div id="directPanel" style="display:none;">
+        <label>Destination Node:</label><br>
+        <input type="text" id="destNodeSearch" placeholder="Search Meshtastic 📡 / MeshCore 🟣 nodes..."><br>
+        <select id="destNode" name="destination_node"></select>
+        <div id="dmNetHint" style="font-size:11px; color:#888; margin-top:4px;"></div>
+      </div>
+
+      <label style="display:block; margin-top:10px;">Message:</label>
       <textarea id="messageBox" name="message" rows="3" style="width:80%;"></textarea>
   <div id="quickEmojiBar" style="margin:6px 0; display:flex; flex-wrap:wrap; gap:6px;"></div>
-  <div id="charCounter">Characters: 0/""" + str(MAX_RESPONSE_LENGTH) + """, Chunks: 0/""" + str(MAX_CHUNKS) + """</div><br>
+  <div id="charCounter">Characters: 0/""" + str(MAX_RESPONSE_LENGTH) + """, Chunks: 0/""" + str(MAX_CHUNKS) + """</div>
+  <div id="sendStatus" style="min-height:18px; font-size:13px; margin:4px 0;"></div>
   <button type="submit" class="reply-btn btn-send">Send</button>
   <button type="button" class="reply-btn btn-reply-dm" onclick="replyToLastDM()">Reply to Last DM</button>
   <button type="button" class="reply-btn btn-reply-channel" onclick="replyToLastChannel()">Reply to Last Channel</button>
@@ -7642,7 +7984,22 @@ def dashboard():
               <option value="desc">Descending</option>
             </select>
           </div>
+          <div class="nodeStaleBar" style="display:flex;align-items:center;gap:6px;flex-wrap:wrap;margin:4px 0 8px;font-size:0.85em;opacity:0.85;">
+            <label for="staleHoursInput" title="Nodes not heard from within this many hours move to 'Previously Seen' (unless favorited). Set 0 to never hide.">🕓 Move quiet nodes to "Previously Seen" after:</label>
+            <input type="number" id="staleHoursInput" min="0" step="1" value="24" style="width:64px;" onchange="setStaleHours(this.value)" title="Hours of silence before a node is hidden. 0 = never hide.">
+            <span>hours (0 = never)</span>
+          </div>
           <div id="nodeListDiv"></div>
+          <div id="previouslySeenWrap" style="display:none;margin-top:12px;">
+            <div id="previouslySeenHeader" onclick="togglePreviouslySeen()" title="Nodes not heard from recently. Click to expand. They stay here (hidden from the map &amp; message targets) until heard from again, or favorite one to pin it back to the main list."
+                 style="cursor:pointer;user-select:none;margin:6px 0 4px;padding:5px 8px;font-weight:bold;border-radius:6px;border-left:4px solid #888;background:rgba(136,136,136,0.15);color:#ddd;">
+              <span id="prevSeenToggleIcon" style="display:inline-block;width:14px;">▶</span>
+              <span style="font-size:1.02em;">🕓 Previously Seen</span>
+              <span id="prevSeenCount" style="opacity:0.7;font-size:0.85em;">(0)</span>
+              <span style="opacity:0.6;font-size:0.78em;font-weight:normal;margin-left:6px;">— not heard from recently · favorite to restore</span>
+            </div>
+            <div id="previouslySeenListDiv" style="display:none;"></div>
+          </div>
         </div>
       </div>
     </div>
@@ -7661,7 +8018,7 @@ def dashboard():
     <a class="btnlink" href="https://github.com/mr-tbot/mesh-api/issues" target="_blank" style="background:#c62828; border-color:#c62828; color:#fff;">🐛 Report a Bug</a>
   </div>
   <div class="footer-right-link">
-    <a class="btnlink" href="https://mr-tbot.com" target="_blank">MESH-API v0.7.4 Beta\nby: MR-TBOT</a>
+    <a class="btnlink" href="https://mesh-api.dev" target="_blank">MESH-API v0.7.4.1 Beta\nby: MR-TBOT</a>
   </div>
   <div class="footer-left-link"><a class="btnlink" href="#" id="settingsFloatBtn">Show UI Settings</a></div>
   <div id="commandsModal" class="modal-overlay" onclick="if(event.target===this) closeCommandsModal()">
@@ -8360,7 +8717,7 @@ def dashboard():
     </div>
     <div style="margin-top:16px;padding:12px;border-top:1px solid #444;">
       <h3>ℹ️ About</h3>
-      <p style="color:#ccc;font-size:0.85em;margin:4px 0;"><strong>MESH-API v0.7.4 Beta</strong></p>
+      <p style="color:#ccc;font-size:0.85em;margin:4px 0;"><strong>MESH-API v0.7.4.1 Beta</strong></p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;">A powerful API and WebUI for <a href="https://meshtastic.org/" target="_blank" style="color:var(--theme-color);">Meshtastic</a> and <a href="https://meshcore.net/" target="_blank" style="color:var(--theme-color);">MeshCore</a> mesh networking devices.</p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;">Created by <a href="https://mr-tbot.com" target="_blank" style="color:var(--theme-color);">MR-TBOT</a></p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;"><a href="https://mesh-api.dev" target="_blank" style="color:var(--theme-color);">mesh-api.dev</a> &bull; <a href="https://github.com/mr-tbot/mesh-api" target="_blank" style="color:var(--theme-color);">GitHub</a> &bull; <a href="https://github.com/mr-tbot/mesh-api/issues" target="_blank" style="color:var(--theme-color);">Report a Bug</a></p>
@@ -8419,13 +8776,32 @@ def commands_page():
 def ui_send():
     message = request.form.get("message", "").strip()
     network = request.form.get("network", DEFAULT_SEND_NETWORK)
+    targets_raw = request.form.get("targets", "").strip()
     mode = "direct" if request.form.get("destination_node", "") != "" else "broadcast"
     if mode == "direct":
         dest_node = request.form.get("destination_node", "").strip()
     else:
         dest_node = None
     if mode == "broadcast":
-        channel_idx = int(request.form.get("channel_index", "0"))
+        # v0.7.4.1 (revamp): the Send box may post a "targets" list of
+        # "<net>:<index>" tokens (mt/mc/both) — one per ticked network — so a
+        # single Send fans out across networks. Fall back to the legacy single
+        # "channel_index" (optionally "<net>:<index>"-prefixed) when absent.
+        raw_idx = str(request.form.get("channel_index", "0")).strip()
+        if ":" in raw_idx:
+            pfx, _, rest = raw_idx.partition(":")
+            pfx = pfx.lower()
+            if pfx == "mc":
+                network = "meshcore"
+            elif pfx == "both":
+                network = "both"
+            elif pfx == "mt":
+                network = "meshtastic"
+            raw_idx = rest
+        try:
+            channel_idx = int(raw_idx)
+        except (TypeError, ValueError):
+            channel_idx = 0
     else:
         channel_idx = None
     if not message:
@@ -8437,6 +8813,25 @@ def ui_send():
             log_message("WebUI", f"{message} [to: {dest_info}]", direct=True, network=net_tag)
             info_print(f"[UI] Direct message to node {dest_info} => '{message}'")
             web_send(message, network, "direct", dest_node=dest_node)
+        elif targets_raw:
+            # Multi-network broadcast: send the message once per ticked target.
+            _net_map = {"mt": "meshtastic", "mc": "meshcore", "both": "both"}
+            for tok in targets_raw.split(","):
+                tok = tok.strip()
+                if not tok:
+                    continue
+                pfx, _, rest = tok.partition(":")
+                t_net = _net_map.get(pfx.lower(), "meshtastic")
+                try:
+                    t_idx = int(rest)
+                except (TypeError, ValueError):
+                    t_idx = 0
+                sent_nets = resolve_send_networks(t_net)
+                log_message("WebUI", f"{message} [to: Broadcast Channel {t_idx} via {'+'.join(sent_nets)}]",
+                            direct=False, channel_idx=t_idx,
+                            network=(sent_nets[0] if len(sent_nets) == 1 else "both"))
+                info_print(f"[UI] Broadcast on channel {t_idx} via {sent_nets} => '{message}'")
+                web_send(message, t_net, "broadcast", channel_idx=t_idx)
         else:
             sent_nets = resolve_send_networks(network)
             log_message("WebUI", f"{message} [to: Broadcast Channel {channel_idx} via {'+'.join(sent_nets)}]",

@@ -1,4 +1,4 @@
-# MESH-API v0.7.4 Beta — Meshtastic + MeshCore Mesh Router & API / AI Bridge
+# MESH-API v0.7.4.1 Beta — Meshtastic + MeshCore Mesh Router & API / AI Bridge
 
 > ## 🎉 Now with full MeshCore support (since v0.7.0)
 >
@@ -10,7 +10,7 @@
 
 > ### 🆕 What's new
 >
-> **v0.7.4** updates the **first-start Setup Wizard** so it now walks you through **MeshCore** as well as Meshtastic: a dedicated MeshCore step (serial / TCP / BLE, adverts, channel bridging), a toggle to run a **MeshCore-only / standalone node**, and a **default send-network** selector — so a fresh install can be configured for either or both radios without hand-editing `config.json`. The prior **v0.7.3.7** was a bug-fix release ensuring **all extensions route to MeshCore** (GitHub [#59](https://github.com/mr-tbot/mesh-api/issues/59)), and **v0.7.3.6** added a **token-free heartbeat** for named AI endpoints.
+> **v0.7.4.1** revamps the dashboard **Send a Message** composer — Broadcast/Direct mode tabs, per-network broadcast checkboxes (📡 Meshtastic, 🟣 MeshCore, 🌉 Bridged), and a bridged channel dropdown that now shows **both** routed channels (e.g. `0 → 📡 LongFast + 🟣 Public`) — adds a **Previously Seen** node section with an adjustable staleness threshold, and fixes **MeshCore presence** so addressable contacts no longer drop out of the live node list (activity-based last-heard). **v0.7.4** updated the **first-start Setup Wizard** to walk you through **MeshCore** as well as Meshtastic: a dedicated MeshCore step (serial / TCP / BLE, adverts, channel bridging), a toggle to run a **MeshCore-only / standalone node**, and a **default send-network** selector. The prior **v0.7.3.7** ensured **all extensions route to MeshCore** (GitHub [#59](https://github.com/mr-tbot/mesh-api/issues/59)), and **v0.7.3.6** added a **token-free heartbeat** for named AI endpoints.
 >
 > 📜 **See the full version history in [CHANGELOG.md](CHANGELOG.md).**
 
@@ -66,8 +66,8 @@ In short, MESH-API bridges the gap between **mesh services** and **online/locall
 > **Disclaimer:**  
 > This project is **NOT ASSOCIATED** with the official Meshtastic Project. It is provided solely as an extension to add AI and advanced features to your Mesh network.  
 
-> **v0.7.4 Beta:**  
-> The 0.7.x line makes MeshCore a first-class radio and adds the MCP server and firmware-update system; v0.7.4 brings the **first-start Setup Wizard up to date with MeshCore** (dedicated radio step, MeshCore-only/standalone toggle, default send-network), building on v0.7.3.7's fix so **every extension routes outbound messages to MeshCore as well as Meshtastic**. **These features are still relatively untested in the field — I am actively seeking community feedback.** Run it with a Meshtastic node, a MeshCore node, or both, and please report what works and what breaks. Avoid relying on it for mission‑critical tasks or emergencies; always keep backup communication methods available and use responsibly.  
+> **v0.7.4.1 Beta:**  
+> The 0.7.x line makes MeshCore a first-class radio and adds the MCP server and firmware-update system; v0.7.4.1 revamps the **Send a Message** composer (broadcast/direct mode tabs, multi-network broadcast targeting, bridged dropdown showing both channels), adds a **Previously Seen** node section, and fixes **MeshCore node presence**, building on v0.7.4's MeshCore Setup Wizard and v0.7.3.7's fix so **every extension routes outbound messages to MeshCore as well as Meshtastic**. **These features are still relatively untested in the field — I am actively seeking community feedback.** Run it with a Meshtastic node, a MeshCore node, or both, and please report what works and what breaks. Avoid relying on it for mission‑critical tasks or emergencies; always keep backup communication methods available and use responsibly.  
 
 >  
 > *I am one robot using other robots to write this code. Some features are still untested in the field. Check the GitHub issues for fixes or feedback!*
@@ -581,493 +581,29 @@ extension by setting `"enabled": true` in its `config.json` and restarting MESH-
 
 ## Developing Custom Extensions
 
-> A step-by-step guide for building custom extensions for the MESH-API plugin system.
-
-### Overview
-
-MESH-API uses a plugin-based extension system where each extension is a self-contained Python package that lives in the `extensions/` directory. Extensions can:
-
-- Register slash commands accessible from the mesh network
-- Send and receive messages to/from the mesh
-- React to emergency broadcasts
-- Observe all inbound mesh messages
-- Expose HTTP endpoints via Flask
-- Run background threads for polling external services
-- Act as AI providers
-
-Extensions are automatically discovered and loaded at startup. No changes to core code are required.
-
-### Quick Start (Extensions)
-
-1. **Copy the template:**
-   ```bash
-   cp -r extensions/_example extensions/my_extension
-   ```
-
-2. **Edit the three files:**
-   - `__init__.py` — leave empty (marks the folder as a Python package)
-   - `config.json` — define your settings (must include `"enabled": true`)
-   - `extension.py` — implement your extension class
-
-3. **Restart MESH-API** — your extension is auto-discovered and loaded.
-
-4. **Verify** — send `/extensions` on the mesh to see it listed.
-
-### Extension Structure
-
-Every extension lives in its own subfolder under `extensions/`:
-
-```
-extensions/
-├── base_extension.py        # Abstract base class (DO NOT MODIFY)
-├── loader.py                 # Extension loader (DO NOT MODIFY)
-├── __init__.py
-└── my_extension/             # Your extension folder
-    ├── __init__.py           # Empty file (required)
-    ├── config.json           # Extension configuration
-    └── extension.py          # Extension implementation
-```
-
-**Naming Rules:**
-- Folder names must be valid Python identifiers (lowercase, underscores OK)
-- Folders starting with `_` are **skipped** by the loader (used for templates)
-- The class inside `extension.py` must subclass `BaseExtension`
-- Class name convention: `<Name>Extension` (e.g. `MyExtension`)
-
-### Base Class API Reference
-
-Every extension inherits from `BaseExtension`. Here's the complete API:
-
-**Constructor (automatic):**
-
-```python
-def __init__(self, extension_dir: str, app_context: dict):
-```
-
-You do **not** override `__init__`. The base class handles:
-- `self.extension_dir` — absolute path to your extension's folder
-- `self.app_context` — shared dict with core helpers (see below)
-- `self._config` — loaded from your `config.json`
-
-**Required Properties (must override):**
-
-| Property | Returns | Description |
-|----------|---------|-------------|
-| `name` | `str` | Human-readable name (e.g. `"My Extension"`) |
-| `version` | `str` | Semantic version (e.g. `"1.0.0"`) |
-
-**Built-in Properties (inherited):**
-
-| Property | Returns | Description |
-|----------|---------|-------------|
-| `enabled` | `bool` | `config["enabled"]` — the loader checks this |
-| `commands` | `dict` | Slash commands to register (override to add) |
-| `config` | `dict` | Read-only access to loaded config |
-
-**Lifecycle Hooks:**
-
-| Method | When Called |
-|--------|------------|
-| `on_load()` | Once after instantiation at startup |
-| `on_unload()` | On shutdown or before hot-reload |
-
-**Message Hooks:**
-
-| Method | Signature | Purpose |
-|--------|-----------|---------|
-| `send_message()` | `(message: str, metadata: dict \| None)` | Outbound: mesh → external service |
-| `receive_message()` | `()` | Inbound polling (prefer background threads) |
-| `handle_command()` | `(command: str, args: str, node_info: dict) → str \| None` | Handle a registered slash command |
-| `on_emergency()` | `(message: str, gps_coords: dict \| None)` | Emergency broadcast hook |
-| `on_message()` | `(message: str, metadata: dict \| None)` | Observe all inbound mesh messages |
-
-**Flask Integration:**
-
-| Method | Signature | Purpose |
-|--------|-----------|---------|
-| `register_routes()` | `(app: Flask)` | Register HTTP endpoints |
-
-**Helper Methods:**
-
-| Method | Signature | Purpose |
-|--------|-----------|---------|
-| `send_to_mesh()` | `(text, channel_index=None, destination_id=None)` | Send a message to the mesh network |
-| `log()` | `(message: str)` | Write to the MESH-API script log |
-| `_save_config()` | `()` | Persist config changes to disk |
-
-**app_context Dict:**
-
-The `app_context` dict provides access to core functionality:
-
-| Key | Type | Description |
-|-----|------|-------------|
-| `interface` | `MeshInterface` | The Meshtastic serial/TCP/BLE interface |
-| `send_broadcast_chunks` | `function(iface, text, channel_idx)` | Send broadcast message |
-| `send_direct_chunks` | `function(iface, text, destination_id)` | Send direct message |
-| `add_script_log` | `function(message)` | Core logging function |
-| `flask_app` | `Flask` | The Flask application instance |
-| `config` | `dict` | Main `config.json` contents |
-
-### Step-by-Step Tutorial
-
-**1. Create the folder structure:**
-
-```
-extensions/my_sensor/
-├── __init__.py          # Empty
-├── config.json
-└── extension.py
-```
-
-**2. Define config.json:**
-
-```json
-{
-  "enabled": true,
-  "sensor_url": "http://localhost:9000/api/reading",
-  "poll_interval_seconds": 300,
-  "broadcast_channel_index": 0,
-  "unit": "°F"
-}
-```
-
-The only required key is `"enabled"`. Everything else is up to you.
-
-**3. Implement extension.py:**
-
-```python
-"""My Sensor extension — reads temperature from a local sensor API."""
-
-import threading
-import time
-
-try:
-    import requests
-except ImportError:
-    requests = None
-
-from extensions.base_extension import BaseExtension
-
-
-class MySensorExtension(BaseExtension):
-
-    @property
-    def name(self) -> str:
-        return "My Sensor"
-
-    @property
-    def version(self) -> str:
-        return "1.0.0"
-
-    @property
-    def commands(self) -> dict:
-        return {
-            "/temp": "Read the current temperature",
-        }
-
-    def on_load(self) -> None:
-        self._stop = threading.Event()
-        self.log(f"My Sensor loaded. URL: {self.config.get('sensor_url')}")
-
-    def on_unload(self) -> None:
-        self._stop.set()
-        self.log("My Sensor unloaded.")
-
-    def handle_command(self, command: str, args: str,
-                       node_info: dict) -> str | None:
-        if command == "/temp":
-            return self._read_sensor()
-        return None
-
-    def _read_sensor(self) -> str:
-        url = self.config.get("sensor_url", "")
-        unit = self.config.get("unit", "°F")
-        if not url:
-            return "Sensor URL not configured."
-        try:
-            resp = requests.get(url, timeout=5)
-            data = resp.json()
-            temp = data.get("temperature", "?")
-            return f"🌡️ Current temperature: {temp}{unit}"
-        except Exception as exc:
-            return f"⚠️ Sensor error: {exc}"
-```
-
-**4. Test it:**
-
-1. Restart MESH-API
-2. Send `/extensions` on mesh — should show "My Sensor v1.0.0 [enabled]"
-3. Send `/temp` — should return the temperature reading
-
-### Hook Reference
-
-**handle_command(command, args, node_info) → str | None**
-
-The most commonly used hook. Called when a mesh user sends one of your registered commands.
-
-```python
-def handle_command(self, command: str, args: str, node_info: dict) -> str | None:
-    if command == "/mycmd":
-        sender = node_info.get("shortname", "?")
-        return f"Hello {sender}! You said: {args}"
-    return None  # Not our command
-```
-
-**node_info dict:**
-```python
-{
-    "node_id": "!abcd1234",      # Hex node ID
-    "shortname": "ABC",          # 4-char node short name
-    "longname": "Alpha Bravo",   # Full node name
-    "channel_index": 0,          # Channel the message arrived on
-    "is_direct": False,          # True if DM, False if broadcast
-}
-```
-
-**Return value:**
-- `str` — text sent back to the mesh (broadcast or DM depending on context)
-- `None` — command not handled, loader passes to next extension
-
-**on_message(message, metadata)**
-
-Read-only observer hook. Called for **every** inbound mesh message. Use for logging, analytics, keyword scanning, or triggering side-effects.
-
-```python
-def on_message(self, message: str, metadata: dict | None = None) -> None:
-    if "help" in message.lower():
-        self.log(f"Help request detected: {message}")
-```
-
-**Do NOT** return a response from `on_message`. Use `handle_command` for responses, or `send_to_mesh()` for async replies.
-
-**on_emergency(message, gps_coords)**
-
-Called when `/emergency` or `/911` is triggered on the mesh.
-
-```python
-def on_emergency(self, message: str, gps_coords: dict | None = None) -> None:
-    lat = gps_coords.get("lat", "?") if gps_coords else "?"
-    lon = gps_coords.get("lon", "?") if gps_coords else "?"
-    self.log(f"EMERGENCY at {lat},{lon}: {message}")
-    # Forward to your external service here
-```
-
-**send_message(message, metadata)**
-
-Outbound hook. Called by the loader when the core wants to push a message to external services.
-
-```python
-def send_message(self, message: str, metadata: dict | None = None) -> None:
-    requests.post("https://example.com/api", json={"text": message})
-```
-
-**register_routes(app)**
-
-Register Flask HTTP endpoints for inbound webhooks or APIs.
-
-```python
-def register_routes(self, app) -> None:
-    @app.route("/my_extension/webhook", methods=["POST"])
-    def my_webhook():
-        from flask import request, jsonify
-        data = request.get_json()
-        message = data.get("message", "")
-        self.send_to_mesh(message, channel_index=0)
-        return jsonify({"status": "ok"})
-```
-
-### Extension Configuration
-
-**Reading Config:**
-
-```python
-api_key = self.config.get("api_key", "")
-interval = int(self.config.get("poll_interval", 60))
-```
-
-**Updating Config at Runtime:**
-
-```python
-self._config["last_check"] = "2025-01-01T00:00:00Z"
-self._save_config()  # Writes to config.json on disk
-```
-
-**Config Best Practices:**
-- Always provide defaults with `.get(key, default)`
-- Include `"enabled": false` as the first key
-- Use descriptive key names: `poll_interval_seconds`, `broadcast_channel_index`
-- Document every key in your extension's comments or README
-
-### Flask Routes (Extensions)
-
-Extensions can expose HTTP endpoints. The Flask app is passed to `register_routes()`:
-
-```python
-def register_routes(self, app) -> None:
-    @app.route("/my_ext/data", methods=["GET"])
-    def my_data():
-        from flask import jsonify
-        return jsonify({"status": "ok", "extension": self.name})
-
-    @app.route("/my_ext/inbound", methods=["POST"])
-    def my_inbound():
-        from flask import request
-        data = request.get_json(force=True)
-        text = data.get("message", "")
-        if text:
-            self.send_to_mesh(text)
-        return "OK", 200
-```
-
-**Rules:**
-- Use unique route paths prefixed with your extension name
-- Import Flask utilities inside the route functions (avoid circular imports)
-- Keep route handlers lightweight
-
-### Background Threads
-
-Many extensions need to poll external services. Use daemon threads:
-
-```python
-import threading
-import time
-
-class MyExtension(BaseExtension):
-    def on_load(self) -> None:
-        self._stop = threading.Event()
-        self._thread = threading.Thread(
-            target=self._poll_loop,
-            daemon=True,
-            name="my-ext-poll",
-        )
-        self._thread.start()
-
-    def on_unload(self) -> None:
-        self._stop.set()
-        if self._thread.is_alive():
-            self._thread.join(timeout=10)
-
-    def _poll_loop(self) -> None:
-        time.sleep(10)  # Initial delay to let system stabilize
-
-        while not self._stop.is_set():
-            try:
-                data = self._fetch_data()
-                if data:
-                    self.send_to_mesh(f"New data: {data}")
-            except Exception as exc:
-                self.log(f"Poll error: {exc}")
-
-            # Interruptible sleep (checks stop event every second)
-            interval = int(self.config.get("poll_interval_seconds", 60))
-            for _ in range(interval):
-                if self._stop.is_set():
-                    break
-                time.sleep(1)
-```
-
-**Thread Safety Tips:**
-- Use `threading.Lock()` if shared state is accessed from multiple threads
-- Use `threading.Event()` for clean shutdown signaling
-- Use interruptible sleep pattern (loop with 1-second sleeps)
-- Always set `daemon=True` so threads don't prevent exit
-- Give threads descriptive names
-
-### Extension Best Practices
-
-1. **Guard imports** — wrap optional dependencies in try/except:
-   ```python
-   try:
-       import requests
-   except ImportError:
-       requests = None
-   ```
-
-2. **Handle errors gracefully** — never let exceptions crash the main process:
-   ```python
-   try:
-       result = self._call_api()
-   except Exception as exc:
-       return f"⚠️ Error: {exc}"
-   ```
-
-3. **Respect mesh bandwidth** — keep messages short (< 230 chars if possible). The mesh has limited capacity.
-
-4. **De-duplicate** — track seen message IDs to avoid broadcasting the same alert twice:
-   ```python
-   if msg_id in self._seen_ids:
-       return
-   self._seen_ids.add(msg_id)
-   ```
-
-5. **Clean up in on_unload()** — stop threads, close sockets, flush buffers.
-
-**Naming Conventions:**
-- Folder: `snake_case` (e.g. `my_extension`)
-- Class: `PascalCaseExtension` (e.g. `MyExtension`)
-- Commands: `/<lowercase>` — avoid collisions with built-in commands
-- Config keys: `snake_case` with descriptive names
-
-**Message Formatting — Use emoji prefixes for visual scanning on small screens:**
-- 📡 — radio/connectivity
-- 🚨 — alerts/emergencies  
-- ✅ — success/confirmation
-- ⚠️ — warnings/errors
-- 📋 — lists/info
-- 📧 — email/messages
-- 🌡️ — weather/sensors
-
-### Testing Extensions
-
-1. Set `"enabled": true` in your extension's `config.json`
-2. Restart MESH-API
-3. Check the logs for `[ext:YourName]` entries
-4. Send `/extensions` to verify it's loaded
-5. Test each command from a mesh node
-
-Your `self.log()` calls appear in the MESH-API script log with the prefix `[ext:YourName]`. Check the WebUI Logs panel or the log file.
-
-### Extension Troubleshooting
-
-**Extension not loading:**
-- Check that `extension.py` exists in the folder
-- Ensure `__init__.py` exists (even if empty)
-- Verify the class inherits from `BaseExtension`
-- Check that `name` and `version` properties are defined
-- Folder names starting with `_` are ignored intentionally
-- Check logs for import errors
-
-**Commands not responding:**
-- Verify `commands` property returns a dict with your command
-- Check `handle_command()` matches the exact command string
-- Make sure no other extension registers the same command
-- Confirm `"enabled": true` in your config.json
-
-**send_to_mesh not working:**
-- Ensure `app_context` contains a valid `interface`
-- Check that the mesh interface is connected
-- Verify channel index is valid for your mesh configuration
-
-**Config not loading:**
-- Validate JSON syntax in `config.json` (use a JSON linter)
-- Check file permissions
-- Look for log entries about config load failures
-
-### Extension Examples Reference
-
-The `extensions/` directory includes 25+ working extensions you can reference:
-
-| Extension | Complexity | Good Example Of |
-|-----------|-----------|-----------------|
-| `_example` | Minimal | Basic structure, all hooks documented |
-| `ntfy` | Simple | HTTP API + push notifications |
-| `pushover` | Simple | Outbound-only notifications |
-| `nws_alerts` | Medium | Polling + auto-broadcast + filtering |
-| `telegram` | Medium | Bidirectional bridge + long-polling |
-| `mqtt` | Medium | Event-driven with paho-mqtt |
-| `bbs` | Complex | SQLite database + thread safety + subcommands |
-| `aprs` | Complex | Raw TCP sockets + protocol parsing |
-| `discord` | Complex | Webhook + bot + Flask route |
+> 🧩 **The full extension-development guide now lives in its own file:
+> [DEVELOPING_EXTENSIONS.md](DEVELOPING_EXTENSIONS.md).**
+
+MESH-API uses a plugin-based extension system where each extension is a
+self-contained Python package in the `extensions/` directory. Extensions can
+register slash commands, send/receive mesh messages, react to emergencies,
+observe all inbound traffic, expose Flask HTTP endpoints, run background
+polling threads, and act as AI providers — all auto-discovered at startup with
+no changes to core code.
+
+**To build one:**
+
+1. Copy the template: `cp -r extensions/_example extensions/my_extension`
+2. Edit the three files — `__init__.py` (empty), `config.json` (must include `"enabled": true`), and `extension.py` (subclass `BaseExtension`).
+3. Restart MESH-API — it's auto-discovered and loaded.
+4. Send `/extensions` on the mesh to verify it's listed.
+
+📚 **Full reference** — the complete Base Class API, every lifecycle/message
+hook, the `app_context` dict, a step-by-step tutorial, background-thread and
+Flask-route patterns, best practices, and troubleshooting are all documented in
+**[DEVELOPING_EXTENSIONS.md](DEVELOPING_EXTENSIONS.md)**. For the catalog of the
+30 built-in extensions and their config keys, see
+**[EXTENSIONS.md](EXTENSIONS.md)**.
 
 ---
 
@@ -1088,7 +624,7 @@ The `extensions/` directory includes 25+ working extensions you can reference:
 
 📜 **The full version history has moved to [CHANGELOG.md](CHANGELOG.md)** to keep
 this README short. It covers every release from v0.1 through the current
-v0.7.4 Beta, with both per-release summaries and detailed notes.
+v0.7.4.1 Beta, with both per-release summaries and detailed notes.
 
 ---
 
@@ -1110,7 +646,34 @@ v0.7.4 Beta, with both per-release summaries and detailed notes.
   - When enabled, messages sent on the designated Home Assistant channel (as defined by `"home_assistant_channel_index"`) are forwarded to Home Assistant’s conversation API.
   - In secure mode, include the PIN in your message (format: `PIN=XXXX your message`).
 - **WebUI Messaging:**  
-  - Use the dashboard’s send‑message form to send broadcast or direct messages. The mode toggle and node selection simplify quick replies.
+  - Use the dashboard’s send‑message form to reach the mesh. See [Web UI / Dashboard](#web-ui--dashboard) below for the full breakdown of broadcast/direct modes and multi‑network targeting.
+
+### Web UI / Dashboard
+
+The dashboard at `http://<host>:5000/dashboard` is the primary control surface.
+Key panels:
+
+- **📤 Send a Message** — a two‑mode composer:
+  - **Broadcast mode** lets you target one or more networks at once via
+    checkboxes. Each enabled network shows its own channel picker:
+    - 📡 **Meshtastic** — pick a Meshtastic channel.
+    - 🟣 **MeshCore** — pick a MeshCore channel.
+    - 🌉 **Bridged** — a single selection that fans out to *both* radios; the
+      dropdown shows the paired routing, e.g. `0 → 📡 LongFast + 🟣 Public`,
+      so you can see exactly which Meshtastic and MeshCore channels a bridged
+      send will hit.
+  - **Direct mode** searches your node list (across both networks) and sends a
+    DM; a hint shows which network the selected node lives on.
+- **🟢 Nodes** — live node list grouped by network, plus a **Previously Seen**
+  section for nodes that have gone stale (with an adjustable staleness
+  threshold). Favorites can be pinned so they stay in the main list. MeshCore
+  contacts use activity‑based presence (message activity), since MeshCore nodes
+  advertise only occasionally rather than beaconing continuously.
+- **🗺️ Map** — node positions using live GPS or your manual location.
+- **📈 Traffic Monitor** — recent mesh message feed across both networks.
+- **🤖 Channel Agents** — assign a dedicated AI persona/provider per channel.
+- **🛠️ Config Editor / Setup Wizard** — edit `config.json`,
+  `commands_config.json`, and `motd.json` from the browser (see below).
 
 ### WebUI Config Editor (new)
 
@@ -1201,328 +764,52 @@ The MESH-API server (running on Flask) exposes the following endpoints:
 
 ## Configuration
 
-Your `config.json` file controls core MESH-API settings — connection, AI, messaging, and emergency alerts. **Integration-specific settings** (Discord, Home Assistant, Slack, Telegram, etc.) are now configured per-extension in `extensions/<name>/config.json`. See the [Extensions System](#extensions-system) section and the WebUI Extensions Manager for details.
+> ⚙️ **The full configuration reference now lives in
+> [CONFIGURATION.md](CONFIGURATION.md).**
 
-Below is the **default** `config.json` with inline explanations:
+Core MESH-API settings live in [config.json](config.json) — connection, AI
+provider, messaging, and emergency alerts. Most people never hand-edit it: the
+dashboard's **⚙️ Config** editor and re-runnable **🧙 Setup Wizard** cover every
+core setting (see [Web UI / Dashboard](#web-ui--dashboard)).
 
-```json
-{
-  "debug": false,                          // Enable verbose debug logging
-  "use_mesh_interface": false,             // Set true to use the Meshtastic mesh interface
-  "use_wifi": false,                       // Set true to connect to your node via WiFi instead of serial
-  "wifi_host": "MESHTASTIC NODE IP HERE",  // IP address of your Meshtastic device (WiFi mode)
-  "wifi_port": 4403,                       // TCP port for WiFi connection (default 4403)
+[CONFIGURATION.md](CONFIGURATION.md) documents the complete annotated default
+`config.json`, the multi-radio blocks (`meshtastic_enabled`,
+`default_send_network`, `meshcore`, `mcp`, `firmware`), and the other
+operational settings (logging, device connection, message routing, AI provider
+selection).
 
-  "use_bluetooth": false,                   // Set true to connect to your node via Bluetooth Low Energy (BLE)
-  "ble_address": "",                        // BLE MAC address or UUID of your node (leave empty for auto-scan)
-
-  "extensions_path": "./extensions",       // Path to the extensions directory
-
-  "ai_respond_on_longfast": false,         // Do NOT auto-respond on LongFast (channel 0) — enable only with mesh/community consent
-  "respond_to_mqtt_messages": false,       // If true, the bot responds to messages that arrived via MQTT (off by default to prevent multi-replies)
-
-  "nodes_online_window_sec": 7200,         // Time window (seconds) for /nodes-XY online count
-
-  "serial_port": "/dev/ttyUSB0",           // Serial port if using USB (e.g., /dev/ttyUSB0 on Linux, COMx on Windows)
-  "serial_baud": 460800,                   // Baud rate for serial connections (lower for long USB runs)
-
-  "ai_command": "",                        // Randomized per-install AI command suffix (e.g., "/ai-9z") — generated on first run to prevent collisions
-  "ai_provider": "lmstudio, openai, ollama, claude, gemini, grok, openrouter, groq, deepseek, mistral, or openai_compatible",
-  "system_prompt": "You are a helpful assistant responding to mesh network chats. Respond in as few words as possible while still answering fully.",
-
-  // --- LM Studio ---
-  "lmstudio_url": "http://localhost:1234/v1/chat/completions",
-  "lmstudio_chat_model": "MODEL IDENTIFIER HERE",
-  "lmstudio_embedding_model": "TEXT EMBEDDING MODEL IDENTIFIER HERE",
-  "lmstudio_timeout": 60,
-
-  // --- OpenAI ---
-  "openai_api_key": "",
-  "openai_model": "gpt-4.1-mini",
-  "openai_timeout": 60,
-
-  // --- Ollama ---
-  "ollama_url": "http://localhost:11434/api/generate",
-  "ollama_model": "llama3",
-  "ollama_timeout": 60,
-  "ollama_max_parallel": 1,               // Max concurrent Ollama requests (useful on low-power hardware)
-  "ollama_options": {},                    // Optional generation overrides (e.g., {"num_ctx": 2048, "temperature": 0.2})
-  "ollama_keep_alive": "10m",             // Keep model loaded for this duration; "0" to unload immediately
-
-  // --- Claude ---
-  "claude_api_key": "",
-  "claude_model": "claude-sonnet-4-20250514",
-  "claude_timeout": 60,
-
-  // --- Gemini ---
-  "gemini_api_key": "",
-  "gemini_model": "gemini-2.0-flash",
-  "gemini_timeout": 60,
-
-  // --- Grok ---
-  "grok_api_key": "",
-  "grok_model": "grok-3",
-  "grok_timeout": 60,
-
-  // --- OpenRouter ---
-  "openrouter_api_key": "",
-  "openrouter_model": "openai/gpt-4.1-mini",
-  "openrouter_timeout": 60,
-
-  // --- Groq ---
-  "groq_api_key": "",
-  "groq_model": "llama-3.3-70b-versatile",
-  "groq_timeout": 60,
-
-  // --- DeepSeek ---
-  "deepseek_api_key": "",
-  "deepseek_model": "deepseek-chat",
-  "deepseek_timeout": 60,
-
-  // --- Mistral ---
-  "mistral_api_key": "",
-  "mistral_model": "mistral-small-latest",
-  "mistral_timeout": 60,
-
-  // --- OpenAI-Compatible (any provider with an OpenAI-compatible API) ---
-  "openai_compatible_api_key": "",
-  "openai_compatible_url": "",
-  "openai_compatible_model": "",
-  "openai_compatible_timeout": 60,
-
-  // --- Channel names ---
-  "channel_names": {
-    "0": "LongFast",
-    "1": "Channel 1",
-    "2": "Channel 2",
-    "3": "Channel 3",
-    "4": "Channel 4",
-    "5": "Channel 5",
-    "6": "Channel 6",
-    "7": "Channel 7",
-    "8": "Channel 8",
-    "9": "Channel 9"
-  },
-
-  "reply_in_channels": true,              // Allow AI to reply in broadcast channels
-  "reply_in_directs": true,               // Allow AI to reply in direct messages
-
-  "chunk_size": 200,                      // Maximum size for message chunks (bytes)
-  "max_ai_chunks": 5,                     // Maximum number of chunks per AI response
-  "chunk_delay": 10,                      // Delay (seconds) between chunks to reduce congestion
-
-  "local_location_string": "@ YOUR LOCATION HERE",  // Location label for your node
-  "ai_node_name": "Mesh-API-Alpha",       // Display name for your AI node
-
-  "force_node_num": null,                 // Override the node number (null = auto-detect)
-  "max_message_log": 0,                   // Max messages to log (0 = unlimited)
-
-  // --- Emergency Alerts: Twilio SMS ---
-  "enable_twilio": false,
-  "enable_smtp": false,
-  "alert_phone_number": "+15555555555",
-  "twilio_sid": "TWILIO_SID",
-  "twilio_auth_token": "TWILIO_AUTH_TOKEN",
-  "twilio_from_number": "+14444444444",
-  "twilio_inbound_target": "channel",      // "channel" or "node" for inbound SMS routing
-  "twilio_inbound_channel_index": 1,
-  "twilio_inbound_node": "!FFFFFFFF",
-
-  // --- Emergency Alerts: SMTP Email ---
-  "smtp_host": "SMTP HOST HERE",
-  "smtp_port": 465,                       // 465 for SSL, 587 for TLS
-  "smtp_user": "SMTP USER HERE",
-  "smtp_pass": "SMTP PASS HERE",
-  "alert_email_to": "ALERT EMAIL HERE"
-}
-```
-
-> **Note:** Discord, Home Assistant, Slack, Telegram, and all other integration-specific settings have been moved to the [Extensions System](#extensions-system). Each extension has its own `config.json` under `extensions/<name>/`. You can manage them via the WebUI Extensions Manager or by editing the files directly.
+> **Note:** Integration-specific settings (Discord, Home Assistant, Slack,
+> Telegram, etc.) are configured **per-extension** in
+> `extensions/<name>/config.json`, not in the core config — see
+> [INTEGRATIONS.md](INTEGRATIONS.md) and [EXTENSIONS.md](EXTENSIONS.md).
 
 ---
 
-## Home Assistant & LLM API Integration
+## Integrations
 
-### Home Assistant Integration
+> 🔌 **Integration setup guides now live in
+> [INTEGRATIONS.md](INTEGRATIONS.md).**
 
-> **Home Assistant is now an extension.** Configure it in `extensions/home_assistant/config.json` or via the WebUI Extensions Manager. See [Extensions System](#extensions-system) for details.
+MESH-API connects to external services for AI, alerting, and chat bridging:
 
-- **Enable:** Set `"enabled": true` in `extensions/home_assistant/config.json`.
-- **Configure:** Set the `url`, `token`, `channel_index`, and `timeout` fields in the extension config.
-- **Security (Optional):** Enable `"enable_pin": true` and set `"secure_pin"` in the extension config.
-- **Routing:** Messages on the designated channel are forwarded to Home Assistant. When PIN mode is enabled, include your PIN in the format `PIN=XXXX your message`.
+- **Home Assistant** — forward a channel to the HA conversation API (with
+  optional PIN security).
+- **LLM API** — 12 AI providers (LM Studio, OpenAI, Ollama, Claude, Gemini,
+  Grok, OpenRouter, Groq, DeepSeek, Mistral, OpenAI-compatible).
+- **Email (SMTP)** and **Twilio SMS** — emergency alerting with a Google Maps
+  link.
+- **Discord** — full bot + webhook bridge (detailed bot/permissions setup).
 
-### LLM API Integration
-
-Set `"ai_provider"` in `config.json` to one of the 12 supported providers, then fill in the corresponding API key / URL / model fields:
-
-- **LM Studio:** `"ai_provider": "lmstudio"` — configure `lmstudio_url`, and optionally set `lmstudio_chat_model` / `lmstudio_embedding_model` if using multiple models.
-- **OpenAI:** `"ai_provider": "openai"` — provide `openai_api_key` and choose a model (default `gpt-4.1-mini`).
-- **Ollama:** `"ai_provider": "ollama"` — configure URL, model, and optional generation overrides via `ollama_options`.
-- **Claude:** `"ai_provider": "claude"` — provide `claude_api_key` (default model `claude-sonnet-4-20250514`).
-- **Gemini:** `"ai_provider": "gemini"` — provide `gemini_api_key` (default model `gemini-2.0-flash`).
-- **Grok:** `"ai_provider": "grok"` — provide `grok_api_key` (default model `grok-3`).
-- **OpenRouter:** `"ai_provider": "openrouter"` — provide `openrouter_api_key` (default model `openai/gpt-4.1-mini`).
-- **Groq:** `"ai_provider": "groq"` — provide `groq_api_key` (default model `llama-3.3-70b-versatile`).
-- **DeepSeek:** `"ai_provider": "deepseek"` — provide `deepseek_api_key` (default model `deepseek-chat`).
-- **Mistral:** `"ai_provider": "mistral"` — provide `mistral_api_key` (default model `mistral-small-latest`).
-- **OpenAI-Compatible:** `"ai_provider": "openai_compatible"` — provide `openai_compatible_url`, `openai_compatible_api_key`, and `openai_compatible_model` for any provider with an OpenAI-compatible API.
-
-All providers have a configurable `_timeout` (default 60 seconds).
+Step-by-step setup for each lives in **[INTEGRATIONS.md](INTEGRATIONS.md)**.
+Chat-bridge integrations (Discord, Telegram, Matrix, Mattermost, etc.) are
+extensions — see **[EXTENSIONS.md](EXTENSIONS.md)**.
 
 ---
-
-## Communication Integrations
-
-### Email Integration
-- **Enable Email Alerts:**  
-  - Set `"enable_smtp": true` in `config.json`.
-- **Configure SMTP:**  
-  - Provide the following settings in `config.json`:
-    - `"smtp_host"` (e.g., `smtp.gmail.com`)
-    - `"smtp_port"` (use `465` for SSL or another port for TLS)
-    - `"smtp_user"` (your email address)
-    - `"smtp_pass"` (your email password or app-specific password)
-    - `"alert_email_to"` (recipient email address or list of addresses)
-- **Behavior:**  
-  - Emergency emails include a clickable Google Maps link (generated from available GPS data) so recipients can quickly view the sender’s location.
-- **Note:**  
-  - Ensure your SMTP settings are allowed by your email provider (for example, Gmail may require an app password and proper security settings).
-
----
-
-### Discord Integration: Detailed Setup & Permissions
-
-> **Discord is now an extension.** Configure it in `extensions/discord/config.json` or via the WebUI Extensions Manager. The setup steps below for creating a Discord bot and permissions still apply.
-
-![483177250_1671387500130340_6790017825443843758_n](https://github.com/user-attachments/assets/0042b7a9-8ec9-4492-8668-25ac977a74cd)
-
-
-#### 1. Create a Discord Bot
-- **Access the Developer Portal:**  
-  Go to the [Discord Developer Portal](https://discord.com/developers/applications) and sign in with your Discord account.
-- **Create a New Application:**  
-  Click on "New Application," give it a name (e.g., *MESH-API Bot*), and confirm.
-- **Add a Bot to Your Application:**  
-  - Select your application, then navigate to the **Bot** tab on the left sidebar.  
-  - Click on **"Add Bot"** and confirm by clicking **"Yes, do it!"**  
-  - Customize your bot’s username and icon if desired.
-
-#### 2. Set Up Bot Permissions
-- **Required Permissions:**  
-  Your bot needs a few basic permissions to function correctly:
-  - **View Channels:** So it can see messages in the designated channels.
-  - **Send Messages:** To post responses and emergency alerts.
-  - **Read Message History:** For polling messages from a channel (if polling is enabled).
-  - **Manage Messages (Optional):** If you want the bot to delete or manage messages.
-- **Permission Calculator:**  
-  Use a tool like [Discord Permissions Calculator](https://discordapi.com/permissions.html) to generate the correct permission integer.  
-  For minimal functionality, a permission integer of **3072** (which covers "Send Messages," "View Channels," and "Read Message History") is often sufficient.
-
-#### 3. Invite the Bot to Your Server
-- **Generate an Invite Link:**  
-  Replace `YOUR_CLIENT_ID` with your bot’s client ID (found in the **General Information** tab) in the following URL:
-  ```url
-  https://discord.com/api/oauth2/authorize?client_id=YOUR_CLIENT_ID&permissions=3072&scope=bot
-  ```
-- **Invite the Bot:**  
-  Open the link in your browser, select the server where you want to add the bot, and authorize it. Make sure you have the “Manage Server” permission in that server.
-
-#### 4. Configure Bot Credentials in Extension Config
-Update `extensions/discord/config.json` with the following keys (or use the WebUI Extensions Manager):
-```json
-{
-  "enabled": true,
-  "webhook_url": "YOUR_DISCORD_WEBHOOK_URL",
-  "receive_enabled": true,
-  "bot_token": "YOUR_BOT_TOKEN",
-  "channel_id": "YOUR_CHANNEL_ID",
-  "inbound_channel_index": 1,
-  "send_ai": true,
-  "send_emergency": true
-}
-```
-- **webhook_url:**  
-  Create a webhook in your desired Discord channel (Channel Settings → Integrations → Webhooks) and copy its URL.
-- **bot_token & channel_id:**  
-  Copy your bot’s token from the Developer Portal and enable message polling by specifying the channel ID where the bot should read messages.  
-  To get a channel ID, enable Developer Mode in Discord (User Settings → Advanced → Developer Mode) then right-click the channel and select "Copy ID."
-
-#### 5. Polling Integration (Optional)
-- **Enable Message Polling:**  
-  Set `"receive_enabled": true` in the extension config to allow the bot to poll for new messages.
-- **Routing:**  
-  The `"inbound_channel_index"` key determines the mesh channel used by MESH-API for routing incoming Discord messages.
-
-#### 6. Testing Your Discord Setup
-- **Restart MESH-API** (or hot-reload via the WebUI Extensions Manager).
-- **Check Bot Activity:**  
-  Verify that the bot is present in your server, that it can see messages in the designated channel, and that it can send responses.  
-- **Emergency Alerts & AI Responses:**  
-  Confirm that emergency alerts and AI responses are being posted in Discord as per your extension configuration.
-
-#### 7. Troubleshooting Tips
-- **Permissions Issues:**  
-  If the bot isn’t responding or reading messages, double-check that its role on your server has the required permissions.
-- **Channel IDs & Webhook URLs:**  
-  Verify that you’ve copied the correct channel IDs and webhook URLs (ensure no extra spaces or formatting issues).
-- **Bot Token Security:**  
-  Keep your bot token secure. If it gets compromised, regenerate it immediately from the Developer Portal.
-
----
-
-### Twilio Integration
-- **Enable Twilio:**  
-  - Set `"enable_twilio": true` in `config.json`.
-- **Configure Twilio Credentials:**  
-  - Provide your Twilio settings in `config.json`:
-    - `"twilio_sid": "YOUR_TWILIO_SID"`
-    - `"twilio_auth_token": "YOUR_TWILIO_AUTH_TOKEN"`
-    - `"twilio_from_number": "YOUR_TWILIO_PHONE_NUMBER"`
-    - `"alert_phone_number": "DESTINATION_PHONE_NUMBER"` (the number to receive emergency SMS)
-- **Usage:**  
-  - When an emergency is triggered, the bot sends an SMS containing the alert message (with a Google Maps link if GPS data is available).
-- **Tip:**  
-  - Follow [Twilio's setup guide](https://www.twilio.com/docs/usage/tutorials/how-to-use-your-free-trial-account) to obtain your SID and Auth Token, and ensure that your phone numbers are verified.
-
----
-
-## Other Important Settings
-
-- **Logging & Archives:**  
-  - Script logs are stored in `script.log` and message logs in `messages.log`.
-  - An archive is maintained in `messages_archive.json` to keep recent messages.
-  
-- **Device Connection:**  
-  - Configure the connection method for your Meshtastic device by setting either the `"serial_port"` or enabling `"use_wifi"` along with `"wifi_host"` and `"wifi_port"`.  
-  - For Bluetooth Low Energy (BLE) connections, set `"use_bluetooth": true` and optionally provide `"ble_address"` with the device MAC address or UUID. Leave `"ble_address"` empty for auto-scan. Requires the `bleak` Python package.
-  - Alternatively, enable `"use_mesh_interface"` if applicable.
-  - Connection priority: WiFi TCP > Bluetooth BLE > MeshInterface > USB Serial.
-  - Baud Rate is optionally set if you need - this is for longer USB runs (roof nodes connected via USB) and bad USB connections.
-  
-- **Message Routing & Commands:**  
-  - Custom commands can be added in `commands_config.json`.
-  - The WebUI Dashboard (accessible at [http://localhost:5000/dashboard](http://localhost:5000/dashboard)) displays messages and node status.
-  
-- **AI Provider Settings:**  
-  - Adjust `"ai_provider"` and related API settings (timeouts, models, etc.) for any of the 12 supported providers: LM Studio, OpenAI, Ollama, Claude, Gemini, Grok, OpenRouter, Groq, DeepSeek, Mistral, or any OpenAI-compatible endpoint.
-  
-- **Extensions:**  
-  - Integration-specific settings (Discord, Home Assistant, Slack, Telegram, etc.) are configured per-extension in `extensions/<name>/config.json`. Use the WebUI Extensions Manager to enable, disable, and configure extensions without editing files directly.
-  
-- **Security:**  
-  - If using the Home Assistant extension with PIN protection, follow the specified format (`PIN=XXXX your message`) to ensure messages are accepted.
-  
-- **Testing:**  
-  - You can test SMS sending with your suffixed `/sms-XY` command or trigger an emergency alert to confirm that Twilio and email integrations are functioning.
-
----
-
 
 ## Contributing & Disclaimer
 
-- **v0.7.4 Beta:**  
-  The 0.7.x line makes MeshCore a first-class radio and adds the MCP server, firmware-update system, token-free AI-endpoint heartbeat monitoring (v0.7.3.6), and the all-extensions-to-MeshCore fix (v0.7.3.7); v0.7.4 brings the **first-start Setup Wizard up to date with MeshCore** (dedicated radio step, MeshCore-only/standalone toggle, default send-network). These features are still relatively untested in the field — please report any issues on [GitHub](https://github.com/mr-tbot/mesh-api/issues) so they may be investigated and addressed.
+- **v0.7.4.1 Beta:**  
+  The 0.7.x line makes MeshCore a first-class radio and adds the MCP server, firmware-update system, token-free AI-endpoint heartbeat monitoring (v0.7.3.6), the all-extensions-to-MeshCore fix (v0.7.3.7), and the v0.7.4 MeshCore Setup Wizard; v0.7.4.1 revamps the **Send a Message** composer (mode tabs, multi-network broadcast targeting, bridged dropdown showing both routed channels), adds a **Previously Seen** node section, and fixes **MeshCore presence** (activity-based last-heard). These features are still relatively untested in the field — please report any issues on [GitHub](https://github.com/mr-tbot/mesh-api/issues) so they may be investigated and addressed.
 - **Feedback & Contributions:**  
   Report issues or submit pull requests on GitHub. Your input is invaluable.
 - **Use Responsibly:**  
@@ -1530,11 +817,9 @@ Update `extensions/discord/config.json` with the following keys (or use the WebU
 
 ---
 
----
-
 ## Conclusion
 
-MESH-API v0.7.4 Beta is here! The 0.7.x line treats **MeshCore as a first-class radio** alongside Meshtastic, adds a built-in **MCP server** for external AI agents, a **firmware/software update manager**, token-free AI-endpoint heartbeat monitoring (v0.7.3.6), the all-extensions-to-MeshCore routing fix (v0.7.3.7), and — new in v0.7.4 — a **Setup Wizard that now guides you through MeshCore** (dedicated radio step, MeshCore-only/standalone toggle, default send-network). All on top of the powerful 30-extension plugin system, 12 AI providers, and safer defaults. Whether you’re chatting directly with your node, integrating with Home Assistant, or leveraging multi‑channel alerting (Twilio, Email, Discord), this release offers the most comprehensive and extensible off‑grid AI assistant experience yet. Please report any issues on [GitHub](https://github.com/mr-tbot/mesh-api/issues).
+MESH-API v0.7.4.1 Beta is here! The 0.7.x line treats **MeshCore as a first-class radio** alongside Meshtastic, adds a built-in **MCP server** for external AI agents, a **firmware/software update manager**, token-free AI-endpoint heartbeat monitoring (v0.7.3.6), the all-extensions-to-MeshCore routing fix (v0.7.3.7), the v0.7.4 **MeshCore Setup Wizard**, and — new in v0.7.4.1 — a revamped **Send a Message** composer (broadcast/direct tabs, multi-network targeting, a bridged dropdown showing both routed channels), a **Previously Seen** node section, and a **MeshCore presence** fix. All on top of the powerful 30-extension plugin system, 12 AI providers, and safer defaults. Whether you’re chatting directly with your node, integrating with Home Assistant, or leveraging multi‑channel alerting (Twilio, Email, Discord), this release offers the most comprehensive and extensible off‑grid AI assistant experience yet. Please report any issues on [GitHub](https://github.com/mr-tbot/mesh-api/issues).
 
 **Enjoy tinkering, stay safe, and have fun!**  
 Please share your feedback or report issues on [GitHub](https://github.com/mr-tbot/mesh-api/issues).

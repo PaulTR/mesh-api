@@ -90,6 +90,12 @@ class MeshCoreManager:
         self._channels_lock = threading.Lock()
         self._last_rx_ts: float = 0.0
         self._last_advert: float = 0.0
+        # v0.7.4.1: per-node "last heard" epochs (node id -> unix ts), updated
+        # whenever we receive a DM/channel message from a contact. Combined with
+        # each contact's advertisement time this gives MeshCore nodes the same
+        # last-heard/beacon signal Meshtastic has (so "Previously Seen" works).
+        self._node_last_seen: dict = {}
+        self._node_last_seen_lock = threading.Lock()
 
         self._stats = {
             "rx": 0,            # messages received from MeshCore
@@ -183,6 +189,8 @@ class MeshCoreManager:
         nodes = []
         with self._contacts_lock:
             contacts = dict(self._contacts)
+        with self._node_last_seen_lock:
+            last_seen = dict(self._node_last_seen)
         for key, c in contacts.items():
             if not isinstance(c, dict):
                 continue
@@ -190,12 +198,39 @@ class MeshCoreManager:
             name = c.get("adv_name") or c.get("name") or f"MC_{str(pub)[:6]}"
             lat = c.get("adv_lat")
             lon = c.get("adv_lon")
+            nid = f"!mc-{str(pub)[:8]}"
+            # MeshCore "last heard": newest of the node's advertisement time and
+            # any message we've received from it. last_advert/lastmod are unix
+            # epoch seconds parsed from the firmware contact record.
+            #
+            # IMPORTANT: MeshCore is NOT like Meshtastic. Nodes do not beacon
+            # continuously; they flood an advert only occasionally and the
+            # companion radio keeps a *persistent* contact book, so a contact
+            # stays addressable indefinitely even if its advert is days old.
+            # That means `last_advert` is NOT a reliable presence signal and must
+            # not be used to decide a node is "gone". `last_msg` (message rx via
+            # _node_last_seen) is the only true activity signal, so we surface it
+            # separately for the UI's "Previously Seen" staleness logic.
+            advert = c.get("last_advert") or c.get("lastmod") or 0
+            try:
+                advert = int(advert)
+            except (TypeError, ValueError):
+                advert = 0
+            seen = last_seen.get(nid, 0)
+            try:
+                seen = int(seen)
+            except (TypeError, ValueError):
+                seen = 0
+            last_heard = max(advert, seen) or None
             entry = {
-                "id": f"!mc-{str(pub)[:8]}",
+                "id": nid,
                 "pubkey": pub,
                 "shortName": name,
                 "longName": name,
                 "network": self.NETWORK,
+                "last_advert": advert or None,
+                "last_heard": last_heard,
+                "last_msg": seen or None,
             }
             try:
                 if lat not in (None, 0) or lon not in (None, 0):
@@ -521,6 +556,7 @@ class MeshCoreManager:
             sender_id = self._sender_id(prefix, name)
             self._stats["rx"] += 1
             self._last_rx_ts = time.time()
+            self._mark_node_seen(sender_id)
             self._log(f"[DM] {name}: {text}")
             self._dispatch_inbound(
                 sender_id=sender_id,
@@ -552,6 +588,7 @@ class MeshCoreManager:
             sender_id = self._sender_id(prefix, name)
             self._stats["rx"] += 1
             self._last_rx_ts = time.time()
+            self._mark_node_seen(sender_id)
             self._log(f"[ch{channel}] {name}: {text}")
             self._dispatch_inbound(
                 sender_id=sender_id,
@@ -720,4 +757,11 @@ class MeshCoreManager:
         if slug and not slug.startswith("mc-"):
             return f"!mc-{slug[:16]}"
         return f"!mc-{slug[:16]}" if slug else "!mc-unknown"
+
+    def _mark_node_seen(self, node_id: str) -> None:
+        """Record that we just heard from this MeshCore node id."""
+        if not node_id:
+            return
+        with self._node_last_seen_lock:
+            self._node_last_seen[node_id] = time.time()
 
