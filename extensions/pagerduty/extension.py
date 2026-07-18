@@ -17,6 +17,7 @@ Authentication:
 - api_token: REST API token (for ack/resolve/list — requires read/write).
 """
 
+import hashlib
 import threading
 import time
 from datetime import datetime, timezone
@@ -171,7 +172,11 @@ class PagerdutyExtension(BaseExtension):
         if not self.routing_key:
             return "No routing key configured."
         try:
-            dedup = f"{self.dedup_prefix}-{source}-{int(time.time())}"
+            # dedup_key must be STABLE for identical alerts so PagerDuty coalesces
+            # repeats into one open incident. Including a timestamp made every
+            # trigger unique, opening a brand-new incident on each keyword hit.
+            digest = hashlib.sha1(f"{source}|{summary}".encode("utf-8")).hexdigest()[:12]
+            dedup = f"{self.dedup_prefix}-{source}-{digest}"
             payload = {
                 "routing_key": self.routing_key,
                 "event_action": "trigger",

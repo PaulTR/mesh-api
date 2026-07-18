@@ -397,7 +397,7 @@ class FirmwareUpdater:
                                f"latest release. Use the web flasher.",
                     "web_flasher": "https://flasher.meshtastic.org/"}
 
-        return self._do_esp_flash(port, asset_url, latest)
+        return self._do_esp_flash(port, asset_url, latest, pio_env=pio_env)
 
     def _pick_update_asset(self, rel: Optional[dict], pio_env: Optional[str]) -> Optional[str]:
         if not rel or not pio_env:
@@ -414,7 +414,8 @@ class FirmwareUpdater:
                 return a.get("url")  # zip: handled by _do_esp_flash (extract)
         return None
 
-    def _do_esp_flash(self, port: str, asset_url: str, version: Optional[str]) -> dict:
+    def _do_esp_flash(self, port: str, asset_url: str, version: Optional[str],
+                      pio_env: Optional[str] = None) -> dict:
         if self._flash_state["active"]:
             return {"ok": False, "message": "A flash is already in progress."}
         try:
@@ -436,9 +437,11 @@ class FirmwareUpdater:
             bin_path = local
             if asset_url.lower().endswith(".zip") or zipfile.is_zipfile(local):
                 self._flash_state["progress"] = "extracting"
-                bin_path = self._extract_update_bin(local, tmpdir)
+                bin_path = self._extract_update_bin(local, tmpdir, pio_env=pio_env)
                 if not bin_path:
-                    raise RuntimeError("no -update.bin found in firmware zip")
+                    raise RuntimeError(
+                        f"no matching -update.bin for variant '{pio_env}' found in firmware zip "
+                        f"(refusing to flash an arbitrary board image)")
 
             # Release the serial port before flashing.
             if stop_iface:
@@ -483,16 +486,34 @@ class FirmwareUpdater:
                     break
                 f.write(chunk)
 
-    def _extract_update_bin(self, zip_path: str, outdir: str) -> Optional[str]:
+    def _extract_update_bin(self, zip_path: str, outdir: str,
+                            pio_env: Optional[str] = None) -> Optional[str]:
+        """Extract the firmware binary for THIS device's variant from a release zip.
+
+        A Meshtastic firmware zip contains one -update.bin per board. Flashing the
+        wrong board's image can brick the device, so we require a pio_env match and
+        refuse to guess (return None) when no variant-matched -update.bin is found.
+        """
         try:
             with zipfile.ZipFile(zip_path) as z:
                 names = z.namelist()
-                cand = [n for n in names if n.lower().endswith("update.bin")]
-                if not cand:
-                    cand = [n for n in names if n.lower().endswith(".bin")]
-                if not cand:
+                env = (pio_env or "").lower()
+                target = None
+                if env:
+                    # Only a variant-matched update image is safe to flash.
+                    for n in names:
+                        ln = n.lower()
+                        if env in ln and ln.endswith("update.bin"):
+                            target = n
+                            break
+                else:
+                    # No variant known: only proceed if the zip is unambiguous
+                    # (exactly one -update.bin). Never blind-pick from many.
+                    cand = [n for n in names if n.lower().endswith("update.bin")]
+                    if len(cand) == 1:
+                        target = cand[0]
+                if not target:
                     return None
-                target = cand[0]
                 z.extract(target, outdir)
                 return os.path.join(outdir, target)
         except Exception:

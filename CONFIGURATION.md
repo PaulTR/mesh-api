@@ -166,6 +166,7 @@ these top-level blocks (all configurable from the **⚙️ Config** editor and t
 - `meshtastic_enabled` — set `false` to run a **MeshCore-only / standalone** node.
 - `default_send_network` — `auto` (whichever radios are connected) / `meshtastic` / `meshcore` / `both`.
 - `meshcore` — the MeshCore radio (connection type `serial`/`tcp`/`ble`, port/host/address, adverts, channel bridging).
+  - **BLE keys:** `ble_address` (blank = scan for a `MeshCore-*` device) and `ble_pin` (the 6-digit pairing passkey, if your node requires one). On Linux, MESH-API auto-registers a BlueZ pairing agent (via `bt-agent` from the `bluez-tools` package) that supplies `ble_pin` during pairing — install `bluez-tools` (`sudo apt install bluez-tools`) for automatic BLE pairing, and make sure the Bluetooth adapter is powered/unblocked. If the link keeps dropping right after connecting, it's usually **weak signal** — the connection banner shows the node's RSSI. Both keys are editable in the **⚙️ Config** editor and the **Setup Wizard**.
 - `mcp` — the [MCP server](README.md#mcp-server-model-context-protocol) (disabled by default, bearer-token auth).
 - `firmware` — firmware/software update-checker settings.
 

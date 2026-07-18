@@ -74,6 +74,16 @@ class HomeAssistantExtension(BaseExtension):
     def secure_pin(self) -> str:
         return str(self.config.get("secure_pin", "1234"))
 
+    @property
+    def agent_id(self) -> str:
+        """Optional HA conversation agent id (e.g. 'conversation.llama_cpp_model').
+        When set, requests target this agent instead of HA's default (issue #61)."""
+        return str(self.config.get("agent_id", "") or "").strip()
+
+    @property
+    def language(self) -> str:
+        return str(self.config.get("language", "") or "").strip()
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -135,6 +145,15 @@ class HomeAssistantExtension(BaseExtension):
         if self.ha_token:
             headers["Authorization"] = f"Bearer {self.ha_token}"
         payload = {"text": user_message}
+        # issue #61: target a specific conversation agent when configured, instead
+        # of always hitting HA's default agent. Field names per the HA REST
+        # conversation API: agent_id, language, conversation_id.
+        if self.agent_id:
+            payload["agent_id"] = self.agent_id
+        if self.language:
+            payload["language"] = self.language
+        if getattr(self, "_conversation_id", None):
+            payload["conversation_id"] = self._conversation_id
 
         sanitize = self.app_context.get("sanitize_model_output")
         max_len = self.app_context.get("MAX_RESPONSE_LENGTH", 1000)
@@ -144,6 +163,10 @@ class HomeAssistantExtension(BaseExtension):
                               timeout=self.ha_timeout)
             if r.status_code == 200:
                 data = r.json()
+                # Keep the conversation_id for multi-turn continuity.
+                cid = data.get("conversation_id")
+                if cid:
+                    self._conversation_id = cid
                 speech = data.get("response", {}).get("speech", {})
                 answer = speech.get("plain", {}).get("speech")
                 if answer:
@@ -163,19 +186,27 @@ class HomeAssistantExtension(BaseExtension):
     # ------------------------------------------------------------------
 
     def _pin_is_valid(self, text: str) -> bool:
-        lower = text.lower()
-        if "pin=" not in lower:
+        pin = self.secure_pin
+        if not pin:
             return False
-        idx = lower.find("pin=") + 4
-        candidate = lower[idx:idx + 4]
-        return candidate == self.secure_pin.lower()
+        lower = text.lower()
+        marker = lower.find("pin=")
+        if marker == -1:
+            return False
+        idx = marker + 4  # past "pin="
+        # Compare against the actual PIN length, not a hardcoded 4 chars —
+        # otherwise any PIN whose length != 4 could never validate.
+        candidate = lower[idx:idx + len(pin)]
+        return candidate == pin.lower()
 
     def _strip_pin(self, text: str) -> str:
         lower = text.lower()
         idx = lower.find("pin=")
         if idx == -1:
             return text
-        return text[:idx].strip() + " " + text[idx + 8:].strip()
+        # Remove "pin=" + the PIN itself (length-aware, not a hardcoded 8).
+        end = idx + 4 + len(self.secure_pin)
+        return (text[:idx].strip() + " " + text[end:].strip()).strip()
 
     # ------------------------------------------------------------------
     # Internal helpers

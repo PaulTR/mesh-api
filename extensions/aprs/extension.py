@@ -295,6 +295,15 @@ class AprsExtension(BaseExtension):
         """Send an APRS message via APRS-IS."""
         if not self.callsign or not self.passcode:
             return "APRS-IS credentials not configured."
+        # APRS-IS is a line-based protocol: a CR/LF in mesh-user input would
+        # inject additional spoofed packets under our authenticated login. Strip
+        # control chars and cap to APRS field limits before building the packet.
+        to_call = "".join(c for c in (to_call or "") if c.isprintable() and c not in "\r\n").strip().upper()[:9]
+        message = "".join(c for c in (message or "") if c.isprintable() and c not in "\r\n")[:67]
+        if not to_call:
+            return "Invalid APRS callsign."
+        if not message:
+            return "Empty APRS message."
         try:
             self._msg_counter += 1
             msg_no = str(self._msg_counter % 100).zfill(2)

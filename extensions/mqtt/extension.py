@@ -120,10 +120,21 @@ class MqttExtension(BaseExtension):
         self.log(f"MQTT connecting to {self.broker_host}:{self.broker_port}")
 
         try:
-            self._client = mqtt_client.Client(
-                client_id=self.client_id,
-                protocol=mqtt_client.MQTTv311,
-            )
+            try:
+                # paho-mqtt 2.x requires an explicit callback API version.
+                # VERSION1 keeps the classic on_connect(client, userdata, flags, rc)
+                # signatures used below, so the same callbacks work on 1.x and 2.x.
+                self._client = mqtt_client.Client(
+                    callback_api_version=mqtt_client.CallbackAPIVersion.VERSION1,
+                    client_id=self.client_id,
+                    protocol=mqtt_client.MQTTv311,
+                )
+            except (AttributeError, TypeError):
+                # paho-mqtt 1.x: no callback_api_version parameter.
+                self._client = mqtt_client.Client(
+                    client_id=self.client_id,
+                    protocol=mqtt_client.MQTTv311,
+                )
             if self.mqtt_username:
                 self._client.username_pw_set(self.mqtt_username, self.mqtt_password)
             if self.use_tls:

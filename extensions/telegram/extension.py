@@ -75,6 +75,15 @@ class TelegramExtension(BaseExtension):
     def poll_interval(self) -> int:
         return int(self.config.get("poll_interval_seconds", 5))
 
+    @property
+    def allow_commands(self) -> bool:
+        """v0.7.5.0 (GitHub #59): when true, a Telegram message that starts with
+        '/' is routed through the core command pipeline and the reply is sent back
+        to Telegram — so /ai, /whereami, etc. work from Telegram. Ordinary chat is
+        still NOT auto-answered by the AI (echo-loop protection stays intact).
+        Off by default."""
+        return bool(self.config.get("allow_commands", False))
+
     # ------------------------------------------------------------------
     # Lifecycle
     # ------------------------------------------------------------------
@@ -179,6 +188,12 @@ class TelegramExtension(BaseExtension):
                             continue
                         user = msg.get("from", {})
                         username = user.get("username") or user.get("first_name", "TGUser")
+                        # v0.7.5.0 (#59): run slash-commands from Telegram through the
+                        # core command pipeline and reply back to Telegram, instead of
+                        # relaying them to the mesh as literal chat. Opt-in.
+                        if self.allow_commands and text.strip().startswith("/"):
+                            self._handle_tg_command(text.strip(), username)
+                            continue
                         formatted = f"[TG:{username}] {text}"
                         log_fn = self.app_context.get("log_message")
                         if log_fn:
@@ -195,6 +210,47 @@ class TelegramExtension(BaseExtension):
                 time.sleep(5)
 
     # ------------------------------------------------------------------
+    # Commands from Telegram (opt-in) — GitHub #59
+    # ------------------------------------------------------------------
+
+    def _handle_tg_command(self, text: str, username: str) -> None:
+        """Route a Telegram slash-command through the core and reply to Telegram.
+
+        - '/ai <question>' (and '/ask', '/bot') query the AI directly — a Telegram
+          convenience, since the mesh AI alias is randomized to avoid RF collisions.
+        - Any other '/cmd' is dispatched to the core command handler exactly as a
+          mesh user's command would be.
+        The reply goes back only to Telegram; the command is not broadcast to the mesh.
+        """
+        ac = self.app_context or {}
+        cmd = text.split()[0].lower()
+        arg = text[len(text.split()[0]):].strip()
+        resp = None
+        try:
+            if cmd in ("/ai", "/ask", "/bot"):
+                get_ai = ac.get("get_ai_response")
+                if not get_ai:
+                    resp = "AI is not available."
+                elif not arg:
+                    resp = "Usage: /ai <your question>"
+                else:
+                    resp = get_ai(arg)
+            else:
+                handle_command = ac.get("handle_command")
+                if handle_command:
+                    resp = handle_command(cmd, text, f"tg-{username}")
+        except Exception as exc:
+            self.log(f"⚠️ Telegram command error ({cmd}): {exc}")
+            resp = None
+        if resp:
+            max_len = ac.get("MAX_RESPONSE_LENGTH", 2000)
+            self._send_telegram(str(resp)[:max_len])
+            self.log(f"TG command {cmd} handled -> replied to Telegram.")
+        else:
+            self._send_telegram(f"🤖 Unknown or empty command: {cmd}")
+            self.log(f"TG command {cmd}: no response.")
+
+    # ------------------------------------------------------------------
     # Internal helpers
     # ------------------------------------------------------------------
 
@@ -208,6 +264,6 @@ class TelegramExtension(BaseExtension):
                 "chat_id": self.chat_id,
                 "text": text,
                 "parse_mode": "HTML",
-            })
+            }, timeout=15)
         except Exception as exc:
             self.log(f"⚠️ Telegram send error: {exc}")

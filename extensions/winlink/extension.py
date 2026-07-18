@@ -222,8 +222,18 @@ class WinlinkExtension(BaseExtension):
                     lat = gps_coords.get("lat", "?")
                     lon = gps_coords.get("lon", "?")
                     body += f"\nGPS: {lat}, {lon}"
-                self._send_message_api(self.default_to, subject, body)
-                self.log("✅ Emergency alert forwarded via Winlink.")
+                # Use the same API-or-Pat selection as normal sends, and inspect
+                # the returned status — the send helpers return an error STRING
+                # (they don't raise) on failure, so blindly logging success here
+                # falsely reported a failed emergency as delivered.
+                if self.api_key:
+                    result = self._send_message_api(self.default_to, subject, body)
+                else:
+                    result = self._send_message_pat(self.default_to, subject, body)
+                if result and result.lstrip().startswith("⚠️"):
+                    self.log(f"❌ Emergency alert NOT forwarded via Winlink: {result}")
+                else:
+                    self.log("✅ Emergency alert forwarded via Winlink.")
             except Exception as exc:
                 self.log(f"⚠️ Winlink emergency send error: {exc}")
 

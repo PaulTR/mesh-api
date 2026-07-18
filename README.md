@@ -1,4 +1,4 @@
-# MESH-API v0.7.4.1 Beta — Meshtastic + MeshCore Mesh Router & API / AI Bridge
+# MESH-API v0.7.5.0 Beta — Meshtastic + MeshCore Mesh Router & API / AI Bridge
 
 > ## 🎉 Now with full MeshCore support (since v0.7.0)
 >
@@ -10,7 +10,7 @@
 
 > ### 🆕 What's new
 >
-> **v0.7.4.1** revamps the dashboard **Send a Message** composer — Broadcast/Direct mode tabs, per-network broadcast checkboxes (📡 Meshtastic, 🟣 MeshCore, 🌉 Bridged), and a bridged channel dropdown that now shows **both** routed channels (e.g. `0 → 📡 LongFast + 🟣 Public`) — adds a **Previously Seen** node section with an adjustable staleness threshold, and fixes **MeshCore presence** so addressable contacts no longer drop out of the live node list (activity-based last-heard). **v0.7.4** updated the **first-start Setup Wizard** to walk you through **MeshCore** as well as Meshtastic: a dedicated MeshCore step (serial / TCP / BLE, adverts, channel bridging), a toggle to run a **MeshCore-only / standalone node**, and a **default send-network** selector. The prior **v0.7.3.7** ensured **all extensions route to MeshCore** (GitHub [#59](https://github.com/mr-tbot/mesh-api/issues/59)), and **v0.7.3.6** added a **token-free heartbeat** for named AI endpoints.
+> **v0.7.5.0** matures the **MeshCore Bluetooth / Wi-Fi / USB** connection paths: a configured **`ble_pin` now actually pairs** (MESH-API auto-registers a BlueZ pairing agent that supplies it), `ble_pin` is now in the **⚙️ Config** editor and **Setup Wizard**, and the connection banner now shows **why** MeshCore isn't connected (BLE **signal strength**, node-seen-in-scan, and a plain-language hint). It also rolls up a batch of fixes — the **#60 WebUI-save startup crash**, a path-traversal hole, node-name XSS, restored **`/emergency` on LongFast**, plus **Home Assistant `agent_id`** (#61) and opt-in **commands from Telegram** (#59). Building on: **v0.7.4.1** revamps the dashboard **Send a Message** composer — Broadcast/Direct mode tabs, per-network broadcast checkboxes (📡 Meshtastic, 🟣 MeshCore, 🌉 Bridged), and a bridged channel dropdown that now shows **both** routed channels (e.g. `0 → 📡 LongFast + 🟣 Public`) — adds a **Previously Seen** node section with an adjustable staleness threshold, and fixes **MeshCore presence** so addressable contacts no longer drop out of the live node list (activity-based last-heard). **v0.7.4** updated the **first-start Setup Wizard** to walk you through **MeshCore** as well as Meshtastic: a dedicated MeshCore step (serial / TCP / BLE, adverts, channel bridging), a toggle to run a **MeshCore-only / standalone node**, and a **default send-network** selector. The prior **v0.7.3.7** ensured **all extensions route to MeshCore** (GitHub [#59](https://github.com/mr-tbot/mesh-api/issues/59)), and **v0.7.3.6** added a **token-free heartbeat** for named AI endpoints.
 >
 > 📜 **See the full version history in [CHANGELOG.md](CHANGELOG.md).**
 
@@ -38,7 +38,8 @@ If MESH-API has been useful to you — whether you're running it on a Raspberry 
 **Thank you to everyone who has donated, filed issues, tested pre-releases, and spread the word.** You are what makes this project possible. 🙏
 
 
-<img width="1151" height="251" alt="MESH-API-HEADER" src="https://github.com/user-attachments/assets/53d213fe-fd3d-4d24-b62d-5620a0c81791" />
+
+![MESH-API](https://github.com/user-attachments/assets/438dc643-6727-439d-a719-0fb905bec920)
 
 
 
@@ -333,10 +334,9 @@ You can run **one Meshtastic radio, one MeshCore radio, or one of each.** With b
 
 ---
 
-<img width="2543" height="1271" alt="image" src="https://github.com/user-attachments/assets/d2091bab-cbdf-4b4d-b424-10d59d812f22" />
+<img width="2545" height="1272" alt="MESH-API-v0 6 0-FINAL" src="https://github.com/user-attachments/assets/49a26e2c-c5fc-4e84-aee9-531d9d38e2bc" />
 
-
-The latest v0.7.4.1 Beta Web-UI!  NEW MAPS FEATURES AND TONS OF NEW GOODIES!
+The latest v0.6.0 Web-UI revamp!  NEW MAPS FEATURES AND TONS OF NEW GOODIES!
 
 ---
 

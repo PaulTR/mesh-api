@@ -116,7 +116,10 @@ class NwsAlertsExtension(BaseExtension):
     def on_load(self) -> None:
         self._poll_thread = None
         self._stop_event = threading.Event()
-        self._seen_ids: set = set()
+        # Insertion-ordered id set (dict keys preserve order) so trimming can
+        # evict the OLDEST ids — set.pop() evicted arbitrary ones, which could
+        # drop a still-active alert and cause it to re-broadcast.
+        self._seen_ids: dict = {}
 
         sources = []
         if self.zone_ids:
@@ -177,7 +180,7 @@ class NwsAlertsExtension(BaseExtension):
                 for alert in alerts:
                     alert_id = alert.get("properties", {}).get("id", "")
                     if alert_id and alert_id not in self._seen_ids:
-                        self._seen_ids.add(alert_id)
+                        self._seen_ids[alert_id] = None
                         props = alert.get("properties", {})
                         # Apply severity filter
                         severity = props.get("severity", "")
@@ -196,12 +199,11 @@ class NwsAlertsExtension(BaseExtension):
                         self.send_to_mesh(text, channel_index=self.broadcast_channel)
                         self.log(f"Broadcast NWS alert: {props.get('event', '?')}")
 
-                # Trim seen set to avoid unbounded growth
+                # Trim seen set to avoid unbounded growth, evicting OLDEST first.
                 if len(self._seen_ids) > 500:
-                    # Keep the most recent 250
                     excess = len(self._seen_ids) - 250
-                    for _ in range(excess):
-                        self._seen_ids.pop()
+                    for old_id in list(self._seen_ids)[:excess]:
+                        del self._seen_ids[old_id]
 
             except Exception as exc:
                 self.log(f"NWS poll error: {exc}")

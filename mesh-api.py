@@ -131,7 +131,14 @@ class StreamToLogger(object):
 
     def write(self, buf):
         # still print everything to the terminal...
-        self.terminal.write(buf)
+        try:
+            self.terminal.write(buf)
+        except UnicodeEncodeError:
+            # Windows consoles default to cp1252, which can't encode the emoji /
+            # box-drawing chars in the banner and messages. Degrade gracefully
+            # instead of crashing the whole process on startup.
+            enc = getattr(self.terminal, "encoding", None) or "utf-8"
+            self.terminal.write(buf.encode(enc, errors="replace").decode(enc, errors="replace"))
         text = buf.strip()
         if not text:
             return
@@ -190,7 +197,7 @@ BANNER = (
 ╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝      ╚═╝  ╚═╝╚═╝     ╚═╝
                                                             
 
-MESH-API v0.7.4.1 Beta by: MR_TBOT (https://mr-tbot.com)
+MESH-API v0.7.5.0 Beta by: MR_TBOT (https://mr-tbot.com)
 https://mesh-api.dev - (https://github.com/mr-tbot/mesh-api/)
     \033[32m 
 Messaging Dashboard Access: http://localhost:5000/dashboard \033[38;5;214m
@@ -293,6 +300,24 @@ def _atomic_write_json(path: str, obj: dict):
     raise
 
 
+def _strip_null_config(obj):
+  """Recursively drop dict keys whose value is JSON ``null``.
+
+  The WebUI config form serializes any cleared numeric field as ``null`` (empty
+  ``<input type=number>`` → JSON null). Persisting that turns a previously ABSENT
+  key into an explicit ``null``, so ``config.get(key, default)`` returns ``None``
+  and the coded default is bypassed — which crashes startup coercions such as
+  ``int(config.get("home_assistant_channel_index", -1))`` (GitHub #60). Nulls are
+  never a meaningful value anywhere in this config (absence == default), so it is
+  always safe to drop them and let the default apply. Lists/scalars pass through.
+  """
+  if isinstance(obj, dict):
+    return {k: _strip_null_config(v) for k, v in obj.items() if v is not None}
+  if isinstance(obj, list):
+    return [_strip_null_config(v) for v in obj]
+  return obj
+
+
 def _atomic_write_text(path: str, text: str):
   """Write plain text to `path` atomically with retry-aware replacement."""
   dir_name = os.path.dirname(path) or "."
@@ -309,7 +334,7 @@ def _atomic_write_text(path: str, text: str):
       pass
     raise
 
-config = safe_load_json(CONFIG_FILE, {})
+config = _strip_null_config(safe_load_json(CONFIG_FILE, {}))
 commands_config = safe_load_json(COMMANDS_CONFIG_FILE, {"commands": []})
 try:
     with open(MOTD_FILE, "r", encoding="utf-8") as f:
@@ -383,6 +408,10 @@ HOME_ASSISTANT_ENABLE_PIN = bool(config.get("home_assistant_enable_pin", False))
 HOME_ASSISTANT_SECURE_PIN = str(config.get("home_assistant_secure_pin", "1234"))
 HOME_ASSISTANT_ENABLED = bool(config.get("home_assistant_enabled", False))
 HOME_ASSISTANT_CHANNEL_INDEX = int(config.get("home_assistant_channel_index", -1))
+# issue #61: optional HA conversation agent + language for the legacy core path
+# (the bundled extension has its own agent_id/language config).
+HOME_ASSISTANT_AGENT_ID = str(config.get("home_assistant_agent_id", "") or "").strip()
+HOME_ASSISTANT_LANGUAGE = str(config.get("home_assistant_language", "") or "").strip()
 
 # v0.7.0: Channel Agents — assign a channel to a specific AI provider or
 # extension agent (OpenClaw, Hermes, Home Assistant, etc.), generalizing the
@@ -524,8 +553,8 @@ def _ensure_ai_command_alias():
   alias = f"/ai-{suffix}"
   config["ai_command"] = alias
   try:
-    with open(CONFIG_FILE, "w", encoding="utf-8") as f:
-      json.dump(config, f, ensure_ascii=False, indent=2)
+    # Atomic write (temp file + replace) so a crash mid-write can't corrupt config.json.
+    _atomic_write_json(CONFIG_FILE, config)
     print(f"Generated randomized AI command alias: {alias} (saved to {CONFIG_FILE})")
   except Exception as e:
     print(f"⚠️ Could not persist ai_command alias to {CONFIG_FILE}: {e}")
@@ -654,6 +683,9 @@ def config_editor_save():
       return jsonify({"message": "config must be a JSON object"}), 400
     if not isinstance(cmds, dict):
       return jsonify({"message": "commands_config must be a JSON object"}), 400
+    # Drop any null values before persisting so a cleared numeric field in the
+    # config form can never brick the next startup coercion (GitHub #60).
+    cfg = _strip_null_config(cfg)
     _atomic_write_json(CONFIG_FILE, cfg)
     _atomic_write_json(COMMANDS_CONFIG_FILE, cmds)
     _atomic_write_text(MOTD_FILE, motd)
@@ -703,6 +735,10 @@ def extensions_status():
 @app.route("/extensions/config/<slug>", methods=["GET"])
 def extensions_config_get(slug):
   """Return the config.json for a specific extension."""
+  # Validate slug to prevent path traversal (e.g. slug=".." would read the
+  # main config.json and leak every API key/secret). Mirrors the PUT/POST guard.
+  if "/" in slug or "\\" in slug or ".." in slug:
+    return jsonify({"message": "Invalid extension name"}), 400
   ext_path = os.path.join(os.path.abspath(EXTENSIONS_PATH), slug, "config.json")
   if not os.path.isfile(ext_path):
     return jsonify({"message": f"Extension '{slug}' config not found"}), 404
@@ -726,6 +762,10 @@ def extensions_config_save(slug):
     data = request.get_json(force=True)
     if not isinstance(data, dict):
       return jsonify({"message": "Config must be a JSON object"}), 400
+    # Strip nulls so a cleared numeric field in the extension config form can't
+    # brick an extension whose accessor does int(config.get(...)) — the same
+    # class of bug as GitHub #60 in the main config editor.
+    data = _strip_null_config(data)
     _atomic_write_json(ext_path, data)
     add_script_log(f"[WebUI] Extension '{slug}' config saved.")
     return jsonify({"status": "ok"})
@@ -1340,6 +1380,10 @@ def send_to_home_assistant(user_message):
     if HOME_ASSISTANT_TOKEN:
         headers["Authorization"] = f"Bearer {HOME_ASSISTANT_TOKEN}"
     payload = {"text": user_message}
+    if HOME_ASSISTANT_AGENT_ID:
+        payload["agent_id"] = HOME_ASSISTANT_AGENT_ID
+    if HOME_ASSISTANT_LANGUAGE:
+        payload["language"] = HOME_ASSISTANT_LANGUAGE
     try:
         r = requests.post(HOME_ASSISTANT_URL, json=payload, headers=headers, timeout=HOME_ASSISTANT_TIMEOUT)
         if r.status_code == 200:
@@ -1521,7 +1565,10 @@ def send_discord_message(content):
     if not (ENABLE_DISCORD and DISCORD_WEBHOOK_URL):
         return
     try:
-        requests.post(DISCORD_WEBHOOK_URL, json={"content": content})
+        # Timeout is essential: this runs synchronously on the Meshtastic pubsub
+        # receive thread, so a hung Discord endpoint would stall all inbound
+        # message processing indefinitely.
+        requests.post(DISCORD_WEBHOOK_URL, json={"content": content}, timeout=10)
     except Exception as e:
         print(f"⚠️ Discord webhook error: {e}")
 
@@ -1889,7 +1936,7 @@ def get_available_commands_text():
   """One-line string of commands for logs/terminal."""
   return ", ".join(cmd for cmd, _ in get_available_commands_list())
 
-def parse_incoming_text(text, sender_id, is_direct, channel_idx):
+def parse_incoming_text(text, sender_id, is_direct, channel_idx, network="meshtastic"):
   dprint(f"parse_incoming_text => text='{text}' is_direct={is_direct} channel={channel_idx}")
   info_print(f"[Info] Received from node {sender_id} (direct={is_direct}, ch={channel_idx}) => '{text}'")
   text = text.strip()
@@ -1912,9 +1959,19 @@ def parse_incoming_text(text, sender_id, is_direct, channel_idx):
   if (not is_direct) and not has_agent and not config.get("reply_in_channels", True):
     return None
   if text.startswith("/"):
+    # Slash commands (including safety-critical /emergency and /911) always route,
+    # even on the LongFast broadcast channel — only AI/agent chatter is gated below.
     cmd = text.split()[0]
     resp = handle_command(cmd, text, sender_id)
     return resp
+  # LongFast (Meshtastic channel 0) AI gate: don't emit AI/agent replies on the
+  # public broadcast channel unless explicitly enabled. Moved here (from on_receive)
+  # so it no longer swallows slash commands. Scoped to Meshtastic so MeshCore's
+  # channel 0 ("Public") keeps its prior behavior.
+  if (network == "meshtastic" and not is_direct and channel_idx == 0
+      and not AI_RESPOND_ON_LONGFAST):
+    dprint("AI_RESPOND_ON_LONGFAST=False; not emitting AI reply on LongFast (ch 0).")
+    return None
   if is_direct:
     return get_ai_response(text)
   if has_agent:
@@ -2023,7 +2080,7 @@ def route_and_respond(network, sender_id, sender_name, text, is_direct, channel_
             return
         if sender_id in AI_NODE_IDS:
             return
-        resp = parse_incoming_text(text, sender_id, is_direct, channel_idx)
+        resp = parse_incoming_text(text, sender_id, is_direct, channel_idx, network=network)
         if not resp:
             return
         if network == "meshtastic":
@@ -2217,10 +2274,9 @@ def on_receive(packet=None, interface=None, **kwargs):
     else:
       is_direct = (my_node_num == to_node_int)
 
-    # LongFast gating: do not respond on channel 0 unless explicitly enabled
-    if (not is_direct) and ch_idx == 0 and not AI_RESPOND_ON_LONGFAST:
-      dprint("AI_RESPOND_ON_LONGFAST=False; not responding on LongFast (ch 0).")
-      return
+    # NOTE: LongFast (channel 0) gating now lives in parse_incoming_text so that
+    # slash commands (e.g. /emergency, /911) still route on channel 0 while AI
+    # replies stay suppressed. Do not early-return here or commands are lost.
 
     # Ignore AI-tagged messages and known AI nodes before parsing
     if text.strip().startswith(AI_PREFIX_TAG):
@@ -5486,7 +5542,14 @@ def dashboard():
     }
 
     let _loadedConfig = {};
-    function cfgVal(id) { const el = document.getElementById(id); if (!el) return undefined; if (el.type === 'checkbox') return el.checked; if (el.type === 'number') { const v = el.value; return v === '' ? null : Number(v); } return el.value; }
+    // Escape untrusted text before it goes into innerHTML / HTML popup strings.
+    // Node shortName/longName are attacker-controllable over the air (Meshtastic
+    // NodeInfo), so interpolating them raw is stored XSS in this dashboard.
+    function escapeHtml(s) {
+      if (s == null) return '';
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+    function cfgVal(id) { const el = document.getElementById(id); if (!el) return undefined; if (el.type === 'checkbox') return el.checked; if (el.type === 'number') { const v = el.value; return v === '' ? undefined : Number(v); } return el.value; }
     function setCfgVal(id, val) { const el = document.getElementById(id); if (!el) return; if (el.type === 'checkbox') el.checked = !!val; else el.value = (val == null) ? '' : val; }
     function showProviderFields() {
       document.querySelectorAll('.ai-provider-section').forEach(s => s.style.display = 'none');
@@ -5526,6 +5589,8 @@ def dashboard():
       setCfgVal('cfg_home_assistant_enable_pin', cfg.home_assistant_enable_pin);
       setCfgVal('cfg_home_assistant_secure_pin', cfg.home_assistant_secure_pin);
       setCfgVal('cfg_home_assistant_channel_index', cfg.home_assistant_channel_index);
+      setCfgVal('cfg_home_assistant_agent_id', cfg.home_assistant_agent_id);
+      setCfgVal('cfg_home_assistant_language', cfg.home_assistant_language);
       // Behavior
       setCfgVal('cfg_system_prompt', cfg.system_prompt);
       setCfgVal('cfg_ai_command', cfg.ai_command);
@@ -5576,6 +5641,7 @@ def dashboard():
       setCfgVal('cfg_mc_tcp_host', mc.tcp_host);
       setCfgVal('cfg_mc_tcp_port', mc.tcp_port);
       setCfgVal('cfg_mc_ble_address', mc.ble_address);
+      setCfgVal('cfg_mc_ble_pin', mc.ble_pin);
       setCfgVal('cfg_mc_bridge_enabled', mc.bridge_enabled);
       setCfgVal('cfg_mc_send_adverts', mc.send_adverts !== false);
       setCfgVal('cfg_mc_advert_interval_sec', mc.advert_interval_sec);
@@ -5620,6 +5686,8 @@ def dashboard():
       cfg.home_assistant_enable_pin = cfgVal('cfg_home_assistant_enable_pin');
       cfg.home_assistant_secure_pin = cfgVal('cfg_home_assistant_secure_pin');
       cfg.home_assistant_channel_index = cfgVal('cfg_home_assistant_channel_index');
+      cfg.home_assistant_agent_id = cfgVal('cfg_home_assistant_agent_id');
+      cfg.home_assistant_language = cfgVal('cfg_home_assistant_language');
       cfg.system_prompt = cfgVal('cfg_system_prompt');
       cfg.ai_command = cfgVal('cfg_ai_command');
       cfg.reply_in_channels = cfgVal('cfg_reply_in_channels');
@@ -5664,6 +5732,7 @@ def dashboard():
         tcp_host: cfgVal('cfg_mc_tcp_host'),
         tcp_port: cfgVal('cfg_mc_tcp_port'),
         ble_address: cfgVal('cfg_mc_ble_address'),
+        ble_pin: cfgVal('cfg_mc_ble_pin'),
         bridge_enabled: cfgVal('cfg_mc_bridge_enabled'),
         send_adverts: cfgVal('cfg_mc_send_adverts'),
         advert_interval_sec: cfgVal('cfg_mc_advert_interval_sec')
@@ -6161,11 +6230,11 @@ def dashboard():
         cName.style.cssText = 'color:#0ff;font-weight:bold;';
         mainLine.appendChild(cName);
         const origName = document.createElement('span');
-        origName.innerHTML = ` <span style="color:#888;font-size:0.85em;">(${n.shortName || ''})</span> <span style="color:#ffa500;">(${n.id})</span>`;
+        origName.innerHTML = ` <span style="color:#888;font-size:0.85em;">(${escapeHtml(n.shortName || '')})</span> <span style="color:#ffa500;">(${escapeHtml(n.id)})</span>`;
         mainLine.appendChild(origName);
       } else {
         const nameSpan = document.createElement('span');
-        nameSpan.innerHTML = `${n.shortName || ''} <span style="color:#ffa500;">(${n.id})</span>`;
+        nameSpan.innerHTML = `${escapeHtml(n.shortName || '')} <span style="color:#ffa500;">(${escapeHtml(n.id)})</span>`;
         mainLine.appendChild(nameSpan);
       }
 
@@ -6582,18 +6651,23 @@ def dashboard():
           let longName = node && node.longName ? node.longName : '';
           let cName = getCustomNodeName(nid);
           let favStar = isFavoriteNode(nid) ? '⭐ ' : '';
-          // Build popup with DM + Google Maps buttons
-          let displayName = cName ? `${cName} <span style="color:#888;font-size:0.85em;">(${name})</span>` : name;
+          // Build popup with DM + Google Maps buttons. Node names are
+          // attacker-controllable over the air, so escape before interpolating.
+          let displayName = cName ? `${escapeHtml(cName)} <span style="color:#888;font-size:0.85em;">(${escapeHtml(name)})</span>` : escapeHtml(name);
+          // For the onclick handlers below: escape for JS-string context (\\ and ')
+          // then HTML-escape so " / < / > can't break out of the attribute either.
+          let nameJs = escapeHtml(String(name).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
+          let nidJs = escapeHtml(String(nid).replace(/\\/g, '\\\\').replace(/'/g, "\\'"));
           let popup = `<b>${favStar}${displayName}</b>`;
-          if (longName) popup += `<br>${longName}`;
-          popup += `<br>ID: ${nid}`;
+          if (longName) popup += `<br>${escapeHtml(longName)}`;
+          popup += `<br>ID: ${escapeHtml(nid)}`;
           popup += `<br>📍 ${gps.lat.toFixed(5)}, ${gps.lon.toFixed(5)}`;
           if (gps.lastHeard) popup += `<br>Last heard: ${gps.lastHeard}`;
           if (gps.hops != null) popup += `<br>Hops: ${gps.hops}`;
           popup += `<br><div style="display:flex;flex-wrap:wrap;gap:6px;margin-top:6px;align-items:center;">`;
-          popup += `<button onclick="openMapDm('${nid}','${name.replace(/'/g,"\\\'")}')" style="background:var(--theme-color);color:#000;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.85em;">💬 DM</button>`;
-          popup += `<button onclick="sendPingToNode('${nid}','${name.replace(/'/g,"\\\'")}')" style="background:#2196f3;color:#fff;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.85em;">📡 PING</button>`;
-          popup += `<button onclick="sendPongToNode('${nid}','${name.replace(/'/g,"\\\'")}')" style="background:#9c27b0;color:#fff;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.85em;">🏓 PONG</button>`;
+          popup += `<button onclick="openMapDm('${nidJs}','${nameJs}')" style="background:var(--theme-color);color:#000;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.85em;">💬 DM</button>`;
+          popup += `<button onclick="sendPingToNode('${nidJs}','${nameJs}')" style="background:#2196f3;color:#fff;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.85em;">📡 PING</button>`;
+          popup += `<button onclick="sendPongToNode('${nidJs}','${nameJs}')" style="background:#9c27b0;color:#fff;border:none;padding:4px 8px;border-radius:5px;cursor:pointer;font-weight:bold;font-size:0.85em;">🏓 PONG</button>`;
           popup += `<a href='https://www.google.com/maps/search/?api=1&query=${gps.lat},${gps.lon}' target='_blank' style='background:#34a853;color:#fff;border:none;padding:4px 8px;border-radius:5px;text-decoration:none;font-weight:bold;font-size:0.85em;'>🗺️ Maps</a>`;
           popup += `</div>`;
           // v0.7.0: distinguish networks on the map. MeshCore = purple dot, Meshtastic = default blue pin.
@@ -6617,7 +6691,7 @@ def dashboard():
           } else {
             marker = L.marker([gps.lat, gps.lon]).bindPopup(popup, {maxWidth: 400});
           }
-          marker.bindTooltip((cName || name) + (isMC ? ' [MC]' : ' [MT]') + (viaMqtt ? ' ☁' : ''), { permanent: true, direction: 'right', offset: [12, 0], className: 'leaflet-marker-label' });
+          marker.bindTooltip(escapeHtml(cName || name) + (isMC ? ' [MC]' : ' [MT]') + (viaMqtt ? ' ☁' : ''), { permanent: true, direction: 'right', offset: [12, 0], className: 'leaflet-marker-label' });
           marker.addTo(nodeMapInstance);
           nodeMapMarkers.push(marker);
           nodeMarkerLookup[nid] = marker;
@@ -6764,6 +6838,17 @@ def dashboard():
               anyConnected = anyConnected || ok;
               allConnected = allConnected && ok;
               let extra = ok && mc.contacts != null ? ` (${mc.contacts} contacts)` : '';
+              // v0.7.5.0: when disconnected, surface *why* (signal/pin/adapter) so a
+              // BLE bring-up doesn't require reading server logs. Data from meshcore.diag/ble.
+              if (!ok) {
+                const b = mc.ble || null, dg = mc.diag || null;
+                const bits = [];
+                if (b && b.found === true && b.rssi != null) bits.push(`signal ${b.rssi} dBm`);
+                else if (b && b.found === false) bits.push('node not seen in scan');
+                if (dg && dg.last_error_hint) bits.push(dg.last_error_hint);
+                else if (dg && dg.last_error) bits.push(dg.last_error);
+                if (bits.length) extra = ` — ${bits.join('; ')}`;
+              }
               parts.push(`🟣 MeshCore: ${ok ? 'Connected' : 'Disconnected'}${extra} ${ok ? '🟢' : '🔴'}`);
             }
             if (!parts.length) {
@@ -7540,7 +7625,8 @@ def dashboard():
           <div><label style="color:#ccc;font-size:0.9em;">TCP Port</label><input type="number" id="wiz_mc_tcp_port" value="5000" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
         </div>
         <div id="wiz_mc_ble_fields" style="display:none;margin:8px 0;">
-          <div><label style="color:#ccc;font-size:0.9em;">BLE Address / Name</label><input type="text" id="wiz_mc_ble_address" placeholder="" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
+          <div><label style="color:#ccc;font-size:0.9em;">BLE Address / Name</label><input type="text" id="wiz_mc_ble_address" placeholder="blank = scan for MeshCore-*" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
+          <div style="margin-top:8px;"><label style="color:#ccc;font-size:0.9em;">BLE Pairing PIN</label><input type="text" id="wiz_mc_ble_pin" placeholder="6-digit passkey (if required)" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0;">
           <div style="display:flex;align-items:center;gap:6px;"><input type="checkbox" id="wiz_mc_send_adverts" checked style="accent-color:var(--theme-color);width:18px;height:18px;"><label for="wiz_mc_send_adverts" style="color:#ccc;font-size:0.9em;">Send adverts</label></div>
@@ -7650,6 +7736,7 @@ def dashboard():
       cfg.meshcore.tcp_host = gv('wiz_mc_tcp_host') || cfg.meshcore.tcp_host;
       cfg.meshcore.tcp_port = parseInt(gv('wiz_mc_tcp_port')) || cfg.meshcore.tcp_port;
       cfg.meshcore.ble_address = gv('wiz_mc_ble_address') || cfg.meshcore.ble_address;
+      { const _p = gv('wiz_mc_ble_pin'); if (_p) cfg.meshcore.ble_pin = _p; }
       cfg.meshcore.send_adverts = gb('wiz_mc_send_adverts');
       cfg.meshcore.bridge_enabled = gb('wiz_mc_bridge');
       // AI Provider
@@ -7715,6 +7802,7 @@ def dashboard():
       sv('wiz_mc_tcp_host', mc.tcp_host);
       sv('wiz_mc_tcp_port', mc.tcp_port);
       sv('wiz_mc_ble_address', mc.ble_address);
+      sv('wiz_mc_ble_pin', mc.ble_pin);
       sb('wiz_mc_send_adverts', mc.send_adverts !== false);
       sb('wiz_mc_bridge', mc.bridge_enabled !== false);
       wizMcShowConn();
@@ -8018,7 +8106,7 @@ def dashboard():
     <a class="btnlink" href="https://github.com/mr-tbot/mesh-api/issues" target="_blank" style="background:#c62828; border-color:#c62828; color:#fff;">🐛 Report a Bug</a>
   </div>
   <div class="footer-right-link">
-    <a class="btnlink" href="https://mesh-api.dev" target="_blank">MESH-API v0.7.4.1 Beta\nby: MR-TBOT</a>
+    <a class="btnlink" href="https://mesh-api.dev" target="_blank">MESH-API v0.7.5.0 Beta\nby: MR-TBOT</a>
   </div>
   <div class="footer-left-link"><a class="btnlink" href="#" id="settingsFloatBtn">Show UI Settings</a></div>
   <div id="commandsModal" class="modal-overlay" onclick="if(event.target===this) closeCommandsModal()">
@@ -8216,6 +8304,8 @@ def dashboard():
                 <div class="cfg-field"><div class="cfg-check"><input type="checkbox" id="cfg_home_assistant_enable_pin"><label for="cfg_home_assistant_enable_pin">Require PIN</label></div></div>
                 <div class="cfg-field"><label>Secure PIN</label><input type="password" id="cfg_home_assistant_secure_pin"></div>
                 <div class="cfg-field"><label>Channel Index</label><input type="number" id="cfg_home_assistant_channel_index" placeholder="-1 = off"></div>
+                <div class="cfg-field full"><label>Agent ID</label><input type="text" id="cfg_home_assistant_agent_id" placeholder="conversation.xxx (blank = HA default)"></div>
+                <div class="cfg-field"><label>Language</label><input type="text" id="cfg_home_assistant_language" placeholder="blank = HA default (e.g. en)"></div>
               </div></div>
               <!-- OpenAI Compatible -->
               <div id="ai_sec_openai_compatible" class="ai-provider-section"><div class="cfg-section-body">
@@ -8345,7 +8435,8 @@ def dashboard():
               <div class="cfg-field"><label>Serial Baud</label><input type="number" id="cfg_mc_serial_baud" placeholder="115200"></div>
               <div class="cfg-field"><label>TCP Host</label><input type="text" id="cfg_mc_tcp_host" placeholder="192.168.1.100"></div>
               <div class="cfg-field"><label>TCP Port</label><input type="number" id="cfg_mc_tcp_port" placeholder="5000"></div>
-              <div class="cfg-field"><label>BLE Address</label><input type="text" id="cfg_mc_ble_address"></div>
+              <div class="cfg-field"><label>BLE Address</label><input type="text" id="cfg_mc_ble_address" placeholder="blank = scan for MeshCore-*"></div>
+              <div class="cfg-field"><label>BLE Pairing PIN</label><input type="text" id="cfg_mc_ble_pin" placeholder="6-digit passkey (if the node requires one)"></div>
               <div class="cfg-field"><div class="cfg-check"><input type="checkbox" id="cfg_mc_bridge_enabled"><label for="cfg_mc_bridge_enabled">Bridge Chat to Meshtastic</label></div></div>
               <div class="cfg-field"><div class="cfg-check"><input type="checkbox" id="cfg_mc_send_adverts"><label for="cfg_mc_send_adverts">Send Adverts (DM discovery)</label></div></div>
               <div class="cfg-field"><label>Advert Interval (sec)</label><input type="number" id="cfg_mc_advert_interval_sec" placeholder="1800"></div>
@@ -8717,7 +8808,7 @@ def dashboard():
     </div>
     <div style="margin-top:16px;padding:12px;border-top:1px solid #444;">
       <h3>ℹ️ About</h3>
-      <p style="color:#ccc;font-size:0.85em;margin:4px 0;"><strong>MESH-API v0.7.4.1 Beta</strong></p>
+      <p style="color:#ccc;font-size:0.85em;margin:4px 0;"><strong>MESH-API v0.7.5.0 Beta</strong></p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;">A powerful API and WebUI for <a href="https://meshtastic.org/" target="_blank" style="color:var(--theme-color);">Meshtastic</a> and <a href="https://meshcore.net/" target="_blank" style="color:var(--theme-color);">MeshCore</a> mesh networking devices.</p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;">Created by <a href="https://mr-tbot.com" target="_blank" style="color:var(--theme-color);">MR-TBOT</a></p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;"><a href="https://mesh-api.dev" target="_blank" style="color:var(--theme-color);">mesh-api.dev</a> &bull; <a href="https://github.com/mr-tbot/mesh-api" target="_blank" style="color:var(--theme-color);">GitHub</a> &bull; <a href="https://github.com/mr-tbot/mesh-api/issues" target="_blank" style="color:var(--theme-color);">Report a Bug</a></p>
@@ -9330,7 +9421,21 @@ def main():
             # Inner loop: periodically check if a reset has been signaled
             while not reset_event.is_set():
                 time.sleep(1)
-            raise OSError("Reset event triggered due to connection loss")
+            # Reset was signaled (e.g. connection_monitor saw a drop). Clear the
+            # flag and reconnect cleanly. Previously this raised a plain OSError
+            # with no errno, which fell through the `except OSError` branch below
+            # without clearing reset_event or sleeping — spinning the reconnect
+            # loop forever on every reset.
+            print("⚠️ Reset event triggered; reconnecting...")
+            add_script_log("Reset event triggered; reconnecting.")
+            reset_event.clear()
+            try:
+                interface.close()
+            except Exception:
+                pass
+            time.sleep(mt_backoff)
+            mt_backoff = min(60, mt_backoff * 2)
+            continue
         except KeyboardInterrupt:
             print("User interrupted the script. Shutting down.")
             add_script_log("Server shutdown via KeyboardInterrupt.")
@@ -9347,10 +9452,19 @@ def main():
             if error_code in (10053, 10054, 10060):
                 print(f"⚠️ Connection was forcibly closed. Reconnecting in {mt_backoff}s...")
                 add_script_log(f"Connection forcibly closed: {e} (error code: {error_code})")
-                time.sleep(mt_backoff)
-                mt_backoff = min(60, mt_backoff * 2)
-                reset_event.clear()
-                continue
+            else:
+                # Any other OSError (including ones with no errno): still reconnect
+                # cleanly rather than falling through and spinning the loop.
+                print(f"⚠️ OSError: {e}. Reconnecting in {mt_backoff}s...")
+                add_script_log(f"OSError: {e} (error code: {error_code})")
+            try:
+                interface.close()
+            except Exception:
+                pass
+            time.sleep(mt_backoff)
+            mt_backoff = min(60, mt_backoff * 2)
+            reset_event.clear()
+            continue
         except Exception as e:
             logging.error(f"⚠️ Connection/runtime error: {e}")
             add_script_log(f"Error: {e}")

@@ -5,5 +5,7 @@
   "timeout": 90,
   "channel_index": 1,
   "enable_pin": false,
-  "secure_pin": "1234"
+  "secure_pin": "1234",
+  "agent_id": "",
+  "language": ""
 }

@@ -36,7 +36,12 @@ gracefully (``available`` is False) so MESH-API still runs.
 from __future__ import annotations
 
 import asyncio
+import os
+import platform
 import re
+import shutil
+import subprocess
+import tempfile
 import threading
 import time
 import traceback
@@ -105,6 +110,27 @@ class MeshCoreManager:
             "reconnects": 0,
         }
 
+        # v0.7.5.0: connection diagnostics so the WebUI/API can show *why* a radio
+        # (esp. BLE) isn't connecting — previously this was only visible in the
+        # server log. Tracks last error, attempt count, and (for BLE) a periodic
+        # scan result with signal strength + bond hint.
+        self._last_error: Optional[str] = None
+        self._last_error_hint: Optional[str] = None
+        self._last_error_ts: float = 0.0
+        self._connect_attempts: int = 0
+        self._last_connect_ts: float = 0.0
+        self._ble_diag: dict = {
+            "found": None,      # was the target device seen in the last scan?
+            "rssi": None,       # signal strength (dBm) of the target device
+            "name": None,       # advertised name of the matched device
+            "address": None,    # matched BLE address
+            "scanned_ts": None, # when the diagnostic scan last ran
+        }
+        self._ble_diag_lock = threading.Lock()
+        self._last_ble_scan: float = 0.0
+        self._ble_agent_proc = None       # bt-agent subprocess (Linux BLE pairing)
+        self._ble_agent_warned = False     # only warn once if bt-agent is missing
+
     # ── Public properties ────────────────────────────────────────────
 
     @property
@@ -154,6 +180,7 @@ class MeshCoreManager:
                 pass
         if self._thread:
             self._thread.join(timeout=10)
+        self._stop_ble_pairing_agent()
         self._started = False
         self._connected = False
         self._log("MeshCore radio manager stopped.")
@@ -257,6 +284,17 @@ class MeshCoreManager:
             "channels": self.get_channels(),
             "last_rx_age_sec": (time.time() - self._last_rx_ts) if self._last_rx_ts else None,
             "stats": dict(self._stats),
+            # v0.7.5.0: connection diagnostics for the WebUI (why isn't it connecting?)
+            "diag": {
+                "last_error": self._last_error,
+                "last_error_hint": self._last_error_hint,
+                "last_error_age_sec": (time.time() - self._last_error_ts) if self._last_error_ts else None,
+                "connect_attempts": self._connect_attempts,
+            },
+            # BLE-only: is the target node visible, and how strong is the signal?
+            "ble": (dict(self._ble_diag)
+                    if str(self._config.get("connection_type", "serial")).lower() == "ble"
+                    else None),
         }
 
     def get_channels(self) -> list:
@@ -339,16 +377,25 @@ class MeshCoreManager:
         backoff = base_interval
         max_backoff = max(base_interval, int(self._config.get("max_reconnect_interval_sec", 120)))
 
+        conn_type = str(self._config.get("connection_type", "serial")).lower()
         while not self._stopping.is_set():
             try:
+                self._connect_attempts += 1
+                self._last_connect_ts = time.time()
                 self._mc = await self._connect()
                 if self._mc is None:
                     self._log(f"connection failed; retrying in {backoff}s…")
+                    # For BLE, run a quick diagnostic scan while we're idle so the
+                    # UI can show whether the node is even visible and how strong.
+                    if conn_type == "ble":
+                        await self._ble_diagnostic_scan()
                     await self._interruptible_sleep(backoff)
                     backoff = min(max_backoff, backoff * 2)
                     continue
 
                 self._connected = True
+                self._last_error = None
+                self._last_error_hint = None
                 backoff = base_interval  # reset backoff on a good connect
                 self._log("✅ connected to MeshCore companion node.")
 
@@ -375,8 +422,11 @@ class MeshCoreManager:
                         self._last_advert = time.time()
 
                 self._log("connection lost.")
+                self._record_error("connection lost after connecting"
+                                   + (" (weak BLE signal drops the link)" if conn_type == "ble" else ""))
             except Exception as exc:
                 self._log(f"⚠️  error: {exc}")
+                self._record_error(str(exc) or repr(exc))
                 self._stats["errors"] += 1
             finally:
                 self._connected = False
@@ -384,6 +434,8 @@ class MeshCoreManager:
 
             if not self._stopping.is_set():
                 self._stats["reconnects"] += 1
+                if conn_type == "ble":
+                    await self._ble_diagnostic_scan()
                 self._log(f"reconnecting in {backoff}s…")
                 await self._interruptible_sleep(backoff)
                 backoff = min(max_backoff, backoff * 2)
@@ -396,6 +448,128 @@ class MeshCoreManager:
         except Exception:
             return False
 
+    def _record_error(self, err: str) -> None:
+        """Store the last connection error plus a human-actionable hint so the UI
+        can explain BLE/TCP/serial failures instead of leaving users to read logs."""
+        self._last_error = str(err)
+        self._last_error_ts = time.time()
+        low = self._last_error.lower()
+        hint = None
+        conn = str(self._config.get("connection_type", "serial")).lower()
+        if "authentication" in low or "auth failed" in low:
+            hint = ("BLE passkey rejected — check ble_pin. The pairing PIN is verified by "
+                    "the device; a wrong pin fails here.")
+        elif "'nonetype' object has no attribute 'pair'" in low or ("pair" in low and "nonetype" in low):
+            hint = ("BLE pairing needs a system BlueZ pairing agent to supply the pin. "
+                    "MESH-API registers one automatically on Linux; if this persists, ensure "
+                    "bluez is installed and the adapter is powered, or pre-bond the node.")
+        elif "no meshcore device found" in low or "not found" in low or "not available" in low:
+            hint = ("Target MeshCore node not seen in BLE scan — confirm it's powered, in BLE "
+                    "range, advertising, and not already connected to a phone/app.")
+        elif "no powered bluetooth" in low or "rf-kill" in low or "rfkill" in low:
+            hint = ("No usable Bluetooth adapter — power it on / unblock rfkill "
+                    "(`rfkill unblock bluetooth`) and ensure the bluetooth service is running.")
+        elif "timed out" in low or "timeout" in low:
+            if conn == "ble":
+                hint = ("BLE connect timed out — usually weak signal. Move the node closer or "
+                        "use a BLE adapter with a better antenna; check ble.rssi below.")
+            elif conn == "tcp":
+                hint = "TCP connect timed out — check tcp_host/tcp_port and that the node is reachable."
+            else:
+                hint = "Serial connect timed out — check serial_port and that the device is attached."
+        elif "discover services" in low:
+            hint = "Connected but GATT service discovery failed — usually an unstable/weak BLE link."
+        self._last_error_hint = hint
+
+    def _ensure_ble_pairing_agent(self, pin: str, addr: Optional[str]) -> None:
+        """Make a BlueZ pairing agent available that answers pairing requests with
+        ``pin``.
+
+        Why this exists: the meshcore library calls ``BleakClient.pair()`` but does
+        NOT hand the configured pin to BlueZ — BlueZ asks a registered *agent* for
+        the passkey. With no agent, pairing fails with AuthenticationCanceled /
+        "'NoneType' object has no attribute 'pair'". Historically users had to run
+        ``bt-agent`` by hand. We now launch one automatically (Linux only, using the
+        ``bt-agent`` from bluez-tools), so a configured ``ble_pin`` actually works.
+
+        Best-effort and non-fatal: no-op on non-Linux, if already running, or if
+        bt-agent isn't installed (we log one-time guidance in that case).
+        """
+        if platform.system() != "Linux":
+            return
+        # Already have a live agent?
+        if self._ble_agent_proc is not None and self._ble_agent_proc.poll() is None:
+            return
+        btagent = shutil.which("bt-agent")
+        if not btagent:
+            if not self._ble_agent_warned:
+                self._ble_agent_warned = True
+                self._log("⚠️  BLE pairing helper 'bt-agent' not found. Install it "
+                          "(`sudo apt install bluez-tools`) so the configured ble_pin can "
+                          "authenticate, or pre-pair the node once with bluetoothctl.")
+            return
+        try:
+            # pin file: '<ADDR> <PIN>' for the target plus a wildcard fallback.
+            fd, pinfile = tempfile.mkstemp(prefix="meshcore-btpin-")
+            with os.fdopen(fd, "w") as f:
+                if addr:
+                    f.write(f"{addr} {pin}\n")
+                f.write(f"* {pin}\n")
+            os.chmod(pinfile, 0o600)
+            self._ble_agent_proc = subprocess.Popen(
+                [btagent, "-c", "KeyboardOnly", "-p", pinfile],
+                stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+            )
+            self._log("registered BLE pairing agent (bt-agent) to supply ble_pin.")
+        except Exception as exc:
+            self._log(f"could not start BLE pairing agent: {exc}")
+            self._ble_agent_proc = None
+
+    def _stop_ble_pairing_agent(self) -> None:
+        proc = self._ble_agent_proc
+        self._ble_agent_proc = None
+        if proc is not None:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+
+    async def _ble_diagnostic_scan(self) -> None:
+        """Best-effort BLE scan (when disconnected) to report whether the target
+        node is visible and at what signal strength — the single most useful thing
+        for diagnosing a BLE bring-up. Throttled and non-fatal."""
+        if not MESHCORE_AVAILABLE:
+            return
+        now = time.time()
+        if now - self._last_ble_scan < 25:
+            return
+        self._last_ble_scan = now
+        try:
+            from bleak import BleakScanner
+        except Exception:
+            return
+        want_addr = (self._config.get("ble_address", "") or "").strip().lower()
+        found = None
+        try:
+            devs = await BleakScanner.discover(timeout=6.0, return_adv=True)
+            for addr, (d, adv) in devs.items():
+                name = (getattr(adv, "local_name", None) or getattr(d, "name", None) or "")
+                is_target = False
+                if want_addr and str(addr).lower() == want_addr:
+                    is_target = True
+                elif not want_addr and name.startswith("MeshCore"):
+                    is_target = True
+                if is_target:
+                    found = {"found": True, "rssi": getattr(adv, "rssi", None),
+                             "name": name or None, "address": str(addr),
+                             "scanned_ts": now}
+                    break
+        except Exception as exc:
+            self._log(f"BLE diagnostic scan error: {exc}")
+        with self._ble_diag_lock:
+            self._ble_diag = found or {"found": False, "rssi": None, "name": None,
+                                       "address": None, "scanned_ts": now}
+
     async def _interruptible_sleep(self, seconds: float) -> None:
         """Sleep that wakes early if a stop is requested."""
         end = time.time() + seconds
@@ -407,12 +581,12 @@ class MeshCoreManager:
         conn_type = str(cfg.get("connection_type", "serial")).lower()
         auto_reconnect = bool(cfg.get("auto_reconnect", True))
         max_attempts = int(cfg.get("max_reconnect_attempts", 0))
-        connect_timeout = float(cfg.get("connect_timeout_sec", 20))
+        connect_timeout = self._num(cfg.get("connect_timeout_sec"), 20.0, float)
 
         try:
             if conn_type == "tcp":
                 host = cfg.get("tcp_host", "192.168.1.100")
-                port = int(cfg.get("tcp_port", 5000))
+                port = self._num(cfg.get("tcp_port"), 5000, int)
                 self._log(f"connecting via TCP {host}:{port}…")
                 coro = MeshCore.create_tcp(
                     host, port,
@@ -422,6 +596,12 @@ class MeshCoreManager:
             elif conn_type == "ble":
                 addr = cfg.get("ble_address", "") or None
                 pin = cfg.get("ble_pin", "") or None
+                # v0.7.5.0: ensure a system BlueZ pairing agent is present so the
+                # meshcore lib's client.pair() has something to supply the passkey
+                # (the lib does NOT feed the pin to BlueZ itself). No-op off-Linux
+                # or when already handled; non-fatal.
+                if pin:
+                    self._ensure_ble_pairing_agent(str(pin), addr)
                 self._log(f"connecting via BLE {addr or '(scan)'}…")
                 if pin:
                     coro = MeshCore.create_ble(addr, pin=str(pin))
@@ -429,7 +609,7 @@ class MeshCoreManager:
                     coro = MeshCore.create_ble(addr)
             else:
                 serial_port = cfg.get("serial_port", "/dev/ttyUSB1")
-                baud = int(cfg.get("serial_baud", 115200))
+                baud = self._num(cfg.get("serial_baud"), 115200, int)
                 self._log(f"connecting via serial {serial_port} @ {baud} baud…")
                 coro = MeshCore.create_serial(serial_port, baud)
 
@@ -437,10 +617,23 @@ class MeshCoreManager:
             return await asyncio.wait_for(coro, timeout=connect_timeout)
         except asyncio.TimeoutError:
             self._log(f"⚠️  connect timed out after {connect_timeout}s.")
+            self._record_error(f"connect timed out after {connect_timeout}s")
             return None
         except Exception as exc:
             self._log(f"⚠️  connection error: {exc}")
+            self._record_error(str(exc) or repr(exc))
             return None
+
+    @staticmethod
+    def _num(val, default, cast):
+        """Null/'' tolerant numeric coercion for config values (mirrors the core
+        config sanitizer) so a blank/None field never crashes a connect."""
+        try:
+            if val is None or val == "":
+                return default
+            return cast(val)
+        except (TypeError, ValueError):
+            return default
 
     async def _send_advert(self) -> None:
         """Flood an advertisement so peers add us as a contact (enables DMs)."""

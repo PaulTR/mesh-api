@@ -241,10 +241,13 @@ class BaseExtension(ABC):
         web_send = self.app_context.get("web_send")
         if web_send:
             try:
+                # Pass an empty network so web_send honors the user's configured
+                # default_send_network (falling back to "auto" = every connected
+                # radio). Hardcoding "auto" here ignored that preference (#59).
                 if destination_id:
-                    web_send(text, "auto", "direct", dest_node=destination_id)
+                    web_send(text, "", "direct", dest_node=destination_id)
                 else:
-                    web_send(text, "auto", "broadcast",
+                    web_send(text, "", "broadcast",
                              channel_idx=channel_index or 0)
                 return
             except Exception as exc:

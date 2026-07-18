@@ -90,6 +90,7 @@ Bidirectional Telegram bot bridge using the Bot API with `getUpdates` long-polli
 | `forward_to_mesh` | bool | `true` | Forward Telegram→mesh |
 | `broadcast_channel_index` | int | `0` | Mesh channel index |
 | `parse_mode` | string | `"HTML"` | Telegram parse mode |
+| `allow_commands` | bool | `false` | If true, a Telegram message starting with `/` is run through the command pipeline and the reply is sent back to Telegram — so `/ai <question>`, `/whereami`, etc. work from Telegram. Ordinary chat is still **not** auto-answered by the AI (echo-loop protection). `/ai`, `/ask`, `/bot` query the AI directly (Telegram convenience; the mesh AI alias is randomized). |
 
 **Hooks:** `on_message`, `on_emergency`.
 
