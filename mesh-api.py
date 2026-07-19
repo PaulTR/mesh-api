@@ -1653,19 +1653,26 @@ def send_emergency_notification(node_id, user_msg, lat=None, lon=None, position_
 # Helper: Validate/Strip PIN (for Home Assistant)
 # -----------------------------
 def pin_is_valid(text):
+    pin = HOME_ASSISTANT_SECURE_PIN or ""
+    if not pin:
+        return False
     lower = text.lower()
     if "pin=" not in lower:
         return False
     idx = lower.find("pin=") + 4
-    candidate = lower[idx:idx+4]
-    return (candidate == HOME_ASSISTANT_SECURE_PIN.lower())
+    # Compare against the actual PIN length, not a hardcoded 4 chars — otherwise
+    # any secure_pin whose length != 4 could never validate.
+    candidate = lower[idx:idx + len(pin)]
+    return (candidate == pin.lower())
 
 def strip_pin(text):
     lower = text.lower()
     idx = lower.find("pin=")
     if idx == -1:
         return text
-    return text[:idx].strip() + " " + text[idx+8:].strip()
+    # Remove "pin=" + the PIN itself (length-aware, not a hardcoded 8).
+    end = idx + 4 + len(HOME_ASSISTANT_SECURE_PIN or "")
+    return (text[:idx].strip() + " " + text[end:].strip()).strip()
 
 def route_message_text(user_message, channel_idx):
     if HOME_ASSISTANT_ENABLED and channel_idx == HOME_ASSISTANT_CHANNEL_INDEX:
@@ -1951,6 +1958,13 @@ def parse_incoming_text(text, sender_id, is_direct, channel_idx, network="meshta
   if sender_id in AI_NODE_IDS:
     dprint(f"Ignoring message from known AI node {sender_id}.")
     return None
+  # Slash commands (including safety-critical /emergency and /911) ALWAYS route —
+  # before every reply/AI gate — so alerts fire regardless of reply_in_directs,
+  # reply_in_channels, or the LongFast setting. Only AI/agent chatter is gated below.
+  if text.startswith("/"):
+    cmd = text.split()[0]
+    return handle_command(cmd, text, sender_id)
+  # --- Below here are AI / agent chat replies, which ARE gated. ---
   if is_direct and not config.get("reply_in_directs", True):
     return None
   # Channels with an assigned agent (Home Assistant, OpenClaw, Hermes, etc.)
@@ -1958,12 +1972,6 @@ def parse_incoming_text(text, sender_id, is_direct, channel_idx, network="meshta
   has_agent = (not is_direct) and (get_channel_agent(channel_idx) is not None)
   if (not is_direct) and not has_agent and not config.get("reply_in_channels", True):
     return None
-  if text.startswith("/"):
-    # Slash commands (including safety-critical /emergency and /911) always route,
-    # even on the LongFast broadcast channel — only AI/agent chatter is gated below.
-    cmd = text.split()[0]
-    resp = handle_command(cmd, text, sender_id)
-    return resp
   # LongFast (Meshtastic channel 0) AI gate: don't emit AI/agent replies on the
   # public broadcast channel unless explicitly enabled. Moved here (from on_receive)
   # so it no longer swallows slash commands. Scoped to Meshtastic so MeshCore's

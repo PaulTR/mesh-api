@@ -130,6 +130,7 @@ class MeshCoreManager:
         self._last_ble_scan: float = 0.0
         self._ble_agent_proc = None       # bt-agent subprocess (Linux BLE pairing)
         self._ble_agent_warned = False     # only warn once if bt-agent is missing
+        self._ble_pin_file = None          # temp pin file for bt-agent (cleaned up)
 
     # ── Public properties ────────────────────────────────────────────
 
@@ -517,13 +518,17 @@ class MeshCoreManager:
                           "authenticate, or pre-pair the node once with bluetoothctl.")
             return
         try:
+            # Remove any previous pin file first so we never accumulate cleartext-PIN
+            # temp files across reconnects/respawns.
+            self._remove_ble_pin_file()
             # pin file: '<ADDR> <PIN>' for the target plus a wildcard fallback.
             fd, pinfile = tempfile.mkstemp(prefix="meshcore-btpin-")
+            os.chmod(pinfile, 0o600)
             with os.fdopen(fd, "w") as f:
                 if addr:
                     f.write(f"{addr} {pin}\n")
                 f.write(f"* {pin}\n")
-            os.chmod(pinfile, 0o600)
+            self._ble_pin_file = pinfile
             self._ble_agent_proc = subprocess.Popen(
                 [btagent, "-c", "KeyboardOnly", "-p", pinfile],
                 stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
@@ -532,6 +537,16 @@ class MeshCoreManager:
         except Exception as exc:
             self._log(f"could not start BLE pairing agent: {exc}")
             self._ble_agent_proc = None
+            self._remove_ble_pin_file()
+
+    def _remove_ble_pin_file(self) -> None:
+        f = getattr(self, "_ble_pin_file", None)
+        if f:
+            try:
+                os.unlink(f)
+            except OSError:
+                pass
+            self._ble_pin_file = None
 
     def _stop_ble_pairing_agent(self) -> None:
         proc = self._ble_agent_proc
@@ -541,6 +556,8 @@ class MeshCoreManager:
                 proc.terminate()
             except Exception:
                 pass
+        # Never leave the cleartext-PIN file behind.
+        self._remove_ble_pin_file()
 
     async def _ble_diagnostic_scan(self) -> None:
         """Best-effort BLE scan (when disconnected) to report whether the target
