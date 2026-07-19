@@ -497,9 +497,17 @@ class MeshCoreManager:
         """
         if platform.system() != "Linux":
             return
-        # Already have a live agent?
+        # Already have a live agent we launched?
         if self._ble_agent_proc is not None and self._ble_agent_proc.poll() is None:
             return
+        # Or a bt-agent already running system-wide (e.g. a user-managed systemd
+        # service)? Don't launch a second one — two agents fight over pairing.
+        try:
+            if subprocess.run(["pgrep", "-x", "bt-agent"],
+                              stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL).returncode == 0:
+                return
+        except Exception:
+            pass
         btagent = shutil.which("bt-agent")
         if not btagent:
             if not self._ble_agent_warned:
