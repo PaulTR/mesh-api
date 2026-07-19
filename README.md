@@ -1,4 +1,4 @@
-# MESH-API v0.7.5.0 Beta — Meshtastic + MeshCore Mesh Router & API / AI Bridge
+# MESH-API v0.7.5.1 Beta — Meshtastic + MeshCore Mesh Router & API / AI Bridge
 
 > ## 🎉 Now with full MeshCore support (since v0.7.0)
 >
@@ -39,7 +39,7 @@ If MESH-API has been useful to you — whether you're running it on a Raspberry 
 
 
 
-![MESH-API](https://github.com/user-attachments/assets/438dc643-6727-439d-a719-0fb905bec920)
+<img width="1151" height="251" alt="MESH-API-HEADER" src="https://github.com/user-attachments/assets/53d213fe-fd3d-4d24-b62d-5620a0c81791" />
 
 
 
@@ -334,9 +334,9 @@ You can run **one Meshtastic radio, one MeshCore radio, or one of each.** With b
 
 ---
 
-<img width="2545" height="1272" alt="MESH-API-v0 6 0-FINAL" src="https://github.com/user-attachments/assets/49a26e2c-c5fc-4e84-aee9-531d9d38e2bc" />
+<img width="2543" height="1271" alt="image" src="https://github.com/user-attachments/assets/d2091bab-cbdf-4b4d-b424-10d59d812f22" />
 
-The latest v0.6.0 Web-UI revamp!  NEW MAPS FEATURES AND TONS OF NEW GOODIES!
+The latest v0.7.5.1 Beta Web-UI!  NEW MAPS FEATURES AND TONS OF NEW GOODIES!
 
 ---
 

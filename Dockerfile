@@ -13,14 +13,12 @@ RUN apt-get update && \
 # (run with --net=host and mount /var/run/dbus, plus a powered host adapter).
 
 # ------------------------------------------------------------
-# Install always-latest Meshtastic Python (pulls matching protobufs)
-# ------------------------------------------------------------
-RUN pip install --no-cache-dir --upgrade \
-    "meshtastic @ git+https://github.com/meshtastic/meshtastic-python.git"
-
-# ------------------------------------------------------------
 # Application
 # ------------------------------------------------------------
+# NOTE: meshtastic (and its matching protobuf) is pinned in requirements.txt and
+# installed below. A previous git-HEAD meshtastic install here was overwritten by
+# the requirements pin, leaving meshtastic and protobuf on mismatched versions —
+# which caused FromRadio protobuf DecodeError at runtime. Pin both together.
 WORKDIR /app
 COPY mesh-api.py .
 COPY meshcore_core.py .
