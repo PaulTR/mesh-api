@@ -197,7 +197,7 @@ BANNER = (
 ╚═╝     ╚═╝╚══════╝╚══════╝╚═╝  ╚═╝      ╚═╝  ╚═╝╚═╝     ╚═╝
                                                             
 
-MESH-API v0.7.5.2 Beta by: MR_TBOT (https://mr-tbot.com)
+MESH-API v0.7.5.3 Beta by: MR_TBOT (https://mr-tbot.com)
 https://mesh-api.dev - (https://github.com/mr-tbot/mesh-api/)
     \033[32m 
 Messaging Dashboard Access: http://localhost:5000/dashboard \033[38;5;214m
@@ -5650,6 +5650,7 @@ def dashboard():
       setCfgVal('cfg_mc_tcp_port', mc.tcp_port);
       setCfgVal('cfg_mc_ble_address', mc.ble_address);
       setCfgVal('cfg_mc_ble_pin', mc.ble_pin);
+      setCfgVal('cfg_mc_ble_adapter', mc.ble_adapter);
       setCfgVal('cfg_mc_bridge_enabled', mc.bridge_enabled);
       setCfgVal('cfg_mc_send_adverts', mc.send_adverts !== false);
       setCfgVal('cfg_mc_advert_interval_sec', mc.advert_interval_sec);
@@ -5741,6 +5742,7 @@ def dashboard():
         tcp_port: cfgVal('cfg_mc_tcp_port'),
         ble_address: cfgVal('cfg_mc_ble_address'),
         ble_pin: cfgVal('cfg_mc_ble_pin'),
+        ble_adapter: cfgVal('cfg_mc_ble_adapter'),
         bridge_enabled: cfgVal('cfg_mc_bridge_enabled'),
         send_adverts: cfgVal('cfg_mc_send_adverts'),
         advert_interval_sec: cfgVal('cfg_mc_advert_interval_sec')
@@ -7635,7 +7637,7 @@ def dashboard():
           <div><label style="color:#ccc;font-size:0.9em;">TCP Port</label><input type="number" id="wiz_mc_tcp_port" value="5000" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
         </div>
         <div id="wiz_mc_ble_fields" style="display:none;margin:8px 0;">
-          <div><label style="color:#ccc;font-size:0.9em;">BLE Address / Name</label><input type="text" id="wiz_mc_ble_address" placeholder="blank = scan for MeshCore-*" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
+          <div><label style="color:#ccc;font-size:0.9em;">BLE Address / Name</label><input type="text" id="wiz_mc_ble_address" placeholder="address, node name, or blank = auto-scan" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
           <div style="margin-top:8px;"><label style="color:#ccc;font-size:0.9em;">BLE Pairing PIN</label><input type="text" id="wiz_mc_ble_pin" placeholder="6-digit passkey (if required)" style="width:100%;background:#222;color:#eee;border:1px solid #555;border-radius:4px;padding:6px;box-sizing:border-box;"></div>
         </div>
         <div style="display:grid;grid-template-columns:1fr 1fr;gap:10px;margin:8px 0;">
@@ -8116,7 +8118,7 @@ def dashboard():
     <a class="btnlink" href="https://github.com/mr-tbot/mesh-api/issues" target="_blank" style="background:#c62828; border-color:#c62828; color:#fff;">🐛 Report a Bug</a>
   </div>
   <div class="footer-right-link">
-    <a class="btnlink" href="https://mesh-api.dev" target="_blank">MESH-API v0.7.5.2 Beta\nby: MR-TBOT</a>
+    <a class="btnlink" href="https://mesh-api.dev" target="_blank">MESH-API v0.7.5.3 Beta\nby: MR-TBOT</a>
   </div>
   <div class="footer-left-link"><a class="btnlink" href="#" id="settingsFloatBtn">Show UI Settings</a></div>
   <div id="commandsModal" class="modal-overlay" onclick="if(event.target===this) closeCommandsModal()">
@@ -8445,8 +8447,9 @@ def dashboard():
               <div class="cfg-field"><label>Serial Baud</label><input type="number" id="cfg_mc_serial_baud" placeholder="115200"></div>
               <div class="cfg-field"><label>TCP Host</label><input type="text" id="cfg_mc_tcp_host" placeholder="192.168.1.100"></div>
               <div class="cfg-field"><label>TCP Port</label><input type="number" id="cfg_mc_tcp_port" placeholder="5000"></div>
-              <div class="cfg-field"><label>BLE Address</label><input type="text" id="cfg_mc_ble_address" placeholder="blank = scan for MeshCore-*"></div>
+              <div class="cfg-field"><label>BLE Address</label><input type="text" id="cfg_mc_ble_address" placeholder="address, node name, or blank = auto-scan"></div>
               <div class="cfg-field"><label>BLE Pairing PIN</label><input type="text" id="cfg_mc_ble_pin" placeholder="6-digit passkey (if the node requires one)"></div>
+              <div class="cfg-field"><label>BLE Adapter</label><input type="text" id="cfg_mc_ble_adapter" placeholder="blank = default (e.g. hci1 for a USB BT5 dongle)"></div>
               <div class="cfg-field"><div class="cfg-check"><input type="checkbox" id="cfg_mc_bridge_enabled"><label for="cfg_mc_bridge_enabled">Bridge Chat to Meshtastic</label></div></div>
               <div class="cfg-field"><div class="cfg-check"><input type="checkbox" id="cfg_mc_send_adverts"><label for="cfg_mc_send_adverts">Send Adverts (DM discovery)</label></div></div>
               <div class="cfg-field"><label>Advert Interval (sec)</label><input type="number" id="cfg_mc_advert_interval_sec" placeholder="1800"></div>
@@ -8818,7 +8821,7 @@ def dashboard():
     </div>
     <div style="margin-top:16px;padding:12px;border-top:1px solid #444;">
       <h3>ℹ️ About</h3>
-      <p style="color:#ccc;font-size:0.85em;margin:4px 0;"><strong>MESH-API v0.7.5.2 Beta</strong></p>
+      <p style="color:#ccc;font-size:0.85em;margin:4px 0;"><strong>MESH-API v0.7.5.3 Beta</strong></p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;">A powerful API and WebUI for <a href="https://meshtastic.org/" target="_blank" style="color:var(--theme-color);">Meshtastic</a> and <a href="https://meshcore.net/" target="_blank" style="color:var(--theme-color);">MeshCore</a> mesh networking devices.</p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;">Created by <a href="https://mr-tbot.com" target="_blank" style="color:var(--theme-color);">MR-TBOT</a></p>
       <p style="color:#aaa;font-size:0.8em;margin:4px 0;"><a href="https://mesh-api.dev" target="_blank" style="color:var(--theme-color);">mesh-api.dev</a> &bull; <a href="https://github.com/mr-tbot/mesh-api" target="_blank" style="color:var(--theme-color);">GitHub</a> &bull; <a href="https://github.com/mr-tbot/mesh-api/issues" target="_blank" style="color:var(--theme-color);">Report a Bug</a></p>

@@ -38,7 +38,7 @@ class MqttExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.1.0"
 
     # ------------------------------------------------------------------
     # Config accessors
@@ -98,8 +98,14 @@ class MqttExtension(BaseExtension):
 
     @property
     def inbound_channel_index(self):
+        """Optional mesh-channel filter. None (shipped default) = no filter:
+        forward every channel and relay inbound on channel 0 (GitHub #59)."""
         val = self.config.get("inbound_channel_index")
         return int(val) if val is not None else None
+
+    def _channel_ok(self, ch_idx) -> bool:
+        """True when *ch_idx* passes the optional channel filter."""
+        return self.inbound_channel_index is None or ch_idx == self.inbound_channel_index
 
     @property
     def qos(self) -> int:
@@ -198,9 +204,8 @@ class MqttExtension(BaseExtension):
             if log_fn:
                 log_fn("MQTT", formatted, direct=False,
                        channel_idx=self.inbound_channel_index)
-            if self.inbound_channel_index is not None:
-                self.send_to_mesh(formatted,
-                                  channel_index=self.inbound_channel_index)
+            self.send_to_mesh(formatted,
+                              channel_index=self.inbound_channel_index)
             self.log(f"MQTT inbound: {formatted}")
         except Exception as exc:
             self.log(f"Error handling MQTT message: {exc}")
@@ -215,20 +220,24 @@ class MqttExtension(BaseExtension):
         ch_idx = metadata.get("channel_idx")
 
         if self.send_all and not is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._publish(self.publish_topic, message, metadata)
             return
 
         if self.send_ai and is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._publish(self.publish_topic, message, metadata)
 
     def on_message(self, message: str, metadata: dict | None = None) -> None:
         if not self.send_all:
             return
+        if message.startswith("[MQTT:"):
+            # Our own MQTT->mesh relay coming back — republishing it would
+            # loop if publish and subscribe topics overlap.
+            return
         metadata = metadata or {}
         ch_idx = metadata.get("channel_idx")
-        if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+        if self._channel_ok(ch_idx):
             self._publish(self.publish_topic, message, metadata)
 
     # ------------------------------------------------------------------

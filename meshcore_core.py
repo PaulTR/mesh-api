@@ -125,12 +125,27 @@ class MeshCoreManager:
             "name": None,       # advertised name of the matched device
             "address": None,    # matched BLE address
             "scanned_ts": None, # when the diagnostic scan last ran
+            "candidates": [],   # nearby MeshCore-looking devices when target absent
         }
         self._ble_diag_lock = threading.Lock()
+        # Address resolved by our own scan when ble_address is blank or a NAME.
+        # Unified companion/repeater firmware advertises the node's own name (not
+        # "MeshCore-*"), and new firmware can come up on a different MAC — so the
+        # configured value may be a name fragment; we resolve it to the live
+        # address here and connect by address (the meshcore lib's internal name
+        # filter only matches names starting with "MeshCore").
+        self._ble_resolved: Optional[dict] = None
+        # The bleak BLEDevice for the resolved node. Connecting via the device
+        # object (instead of a bare address) keeps the connection on the adapter
+        # that saw it — required when ble_adapter selects a USB BT5 dongle
+        # (e.g. hci1) instead of a BT4.x onboard radio that can't see the node.
+        self._ble_resolved_device = None
         self._last_ble_scan: float = 0.0
         self._ble_agent_proc = None       # bt-agent subprocess (Linux BLE pairing)
         self._ble_agent_warned = False     # only warn once if bt-agent is missing
         self._ble_pin_file = None          # temp pin file for bt-agent (cleaned up)
+        self._consecutive_failures = 0     # failed connects since the last good one
+        self._last_absent_log = 0.0        # throttle "node not advertising" log
 
     # ── Public properties ────────────────────────────────────────────
 
@@ -379,52 +394,81 @@ class MeshCoreManager:
         max_backoff = max(base_interval, int(self._config.get("max_reconnect_interval_sec", 120)))
 
         conn_type = str(self._config.get("connection_type", "serial")).lower()
+        # A connection that stays up at least this long is treated as "stable" — it
+        # resets the backoff and the escalation counter. A link that flaps faster
+        # than this (e.g. a BLE companion that drops after a few seconds) keeps
+        # escalating recovery instead of masking the problem.
+        min_stable = self._num(self._config.get("min_stable_sec"), 30.0, float)
+        hard_after = self._num(self._config.get("ble_hard_recover_after"), 4, int)
         while not self._stopping.is_set():
+            stable = False
             try:
+                # BLE: only spend a full connect attempt when the node is actually
+                # advertising. A MeshCore node that dropped often goes silent; blindly
+                # calling connect() just burns a long timeout and thrashes the adapter.
+                # Scan first — if it's absent, wait cheaply and rescan (and auto-connect
+                # the instant it reappears). If it's present but a prior attempt failed,
+                # clear stale BlueZ state first (power-cycle only periodically).
+                if conn_type == "ble":
+                    if not await self._ble_scan_present():
+                        self._record_error("MeshCore node not advertising (BLE) — waiting "
+                                           "for it to appear. A companion node accepts ONE "
+                                           "BLE client and stops advertising while a "
+                                           "phone/app is connected — disconnect the app or "
+                                           "power-cycle the node. Unified "
+                                           "companion+repeater units advertise their node "
+                                           "name (set BLE Address/Name to it, or leave "
+                                           "blank for auto-scan)")
+                        # Log occasionally (not every scan) so it's visible without spam.
+                        if time.time() - self._last_absent_log >= 120:
+                            self._last_absent_log = time.time()
+                            self._log("node not advertising over BLE; waiting for it to appear…")
+                        await self._interruptible_sleep(
+                            self._num(self._config.get("ble_scan_interval_sec"), 15.0, float))
+                        continue
+                    if self._consecutive_failures > 0:
+                        self._ble_recover(hard=(self._consecutive_failures % hard_after == 0))
+
                 self._connect_attempts += 1
                 self._last_connect_ts = time.time()
                 self._mc = await self._connect()
                 if self._mc is None:
                     self._log(f"connection failed; retrying in {backoff}s…")
-                    # For BLE, run a quick diagnostic scan while we're idle so the
-                    # UI can show whether the node is even visible and how strong.
-                    if conn_type == "ble":
-                        await self._ble_diagnostic_scan()
-                    await self._interruptible_sleep(backoff)
-                    backoff = min(max_backoff, backoff * 2)
-                    continue
+                else:
+                    self._connected = True
+                    self._last_error = None
+                    self._last_error_hint = None
+                    self._log("✅ connected to MeshCore companion node.")
+                    connect_start = time.time()
 
-                self._connected = True
-                self._last_error = None
-                self._last_error_hint = None
-                backoff = base_interval  # reset backoff on a good connect
-                self._log("✅ connected to MeshCore companion node.")
+                    await self._after_connect()
+                    await self._subscribe_events()
+                    try:
+                        await self._mc.start_auto_message_fetching()
+                    except Exception as exc:
+                        self._log(f"⚠️  could not start auto message fetching: {exc}")
 
-                await self._after_connect()
-                await self._subscribe_events()
-                try:
-                    await self._mc.start_auto_message_fetching()
-                except Exception as exc:
-                    self._log(f"⚠️  could not start auto message fetching: {exc}")
+                    # Announce ourselves so other MeshCore nodes can discover us as a
+                    # contact (required before they can DM us — e.g. for ping/pong).
+                    await self._send_advert()
+                    self._last_advert = time.time()
 
-                # Announce ourselves so other MeshCore nodes can discover us as a
-                # contact (required before they can DM us — e.g. for ping/pong).
-                await self._send_advert()
-                self._last_advert = time.time()
+                    # Health-checked keep-alive loop.  Fixes silent dead links by
+                    # actively watching the library's connection flag.  Also re-adverts
+                    # on a configurable interval so we stay discoverable for DMs.
+                    advert_interval = int(self._config.get("advert_interval_sec", 1800))
+                    while not self._stopping.is_set() and self._is_link_alive():
+                        await asyncio.sleep(1)
+                        if advert_interval > 0 and (time.time() - self._last_advert) >= advert_interval:
+                            await self._send_advert()
+                            self._last_advert = time.time()
 
-                # Health-checked keep-alive loop.  Fixes silent dead links by
-                # actively watching the library's connection flag.  Also re-adverts
-                # on a configurable interval so we stay discoverable for DMs.
-                advert_interval = int(self._config.get("advert_interval_sec", 1800))
-                while not self._stopping.is_set() and self._is_link_alive():
-                    await asyncio.sleep(1)
-                    if advert_interval > 0 and (time.time() - self._last_advert) >= advert_interval:
-                        await self._send_advert()
-                        self._last_advert = time.time()
-
-                self._log("connection lost.")
-                self._record_error("connection lost after connecting"
-                                   + (" (weak BLE signal drops the link)" if conn_type == "ble" else ""))
+                    up_for = time.time() - connect_start
+                    stable = up_for >= min_stable
+                    self._log(f"connection lost (was up {up_for:.0f}s).")
+                    self._record_error("connection lost after connecting"
+                                       + (" — link dropped quickly; the MeshCore node may be dropping the BLE companion session"
+                                          if (conn_type == "ble" and not stable) else ""))
             except Exception as exc:
                 self._log(f"⚠️  error: {exc}")
                 self._record_error(str(exc) or repr(exc))
@@ -433,13 +477,20 @@ class MeshCoreManager:
                 self._connected = False
                 await self._teardown_connection()
 
+            # A stable connection resets backoff + escalation; anything else counts
+            # as a failure so recovery escalates and backoff grows (bounded).
+            if stable:
+                self._consecutive_failures = 0
+                backoff = base_interval
+            else:
+                self._consecutive_failures += 1
+
             if not self._stopping.is_set():
                 self._stats["reconnects"] += 1
-                if conn_type == "ble":
-                    await self._ble_diagnostic_scan()
                 self._log(f"reconnecting in {backoff}s…")
                 await self._interruptible_sleep(backoff)
-                backoff = min(max_backoff, backoff * 2)
+                if not stable:
+                    backoff = min(max_backoff, backoff * 2)
 
     def _is_link_alive(self) -> bool:
         if not self._mc:
@@ -464,9 +515,12 @@ class MeshCoreManager:
             hint = ("BLE pairing needs a system BlueZ pairing agent to supply the pin. "
                     "MESH-API registers one automatically on Linux; if this persists, ensure "
                     "bluez is installed and the adapter is powered, or pre-bond the node.")
-        elif "no meshcore device found" in low or "not found" in low or "not available" in low:
-            hint = ("Target MeshCore node not seen in BLE scan — confirm it's powered, in BLE "
-                    "range, advertising, and not already connected to a phone/app.")
+        elif ("not advertising" in low or "no meshcore device found" in low
+              or "not found" in low or "not available" in low):
+            hint = ("Target MeshCore node isn't advertising over BLE — nothing to connect to. "
+                    "Reset/reboot the MeshCore node so it advertises again, confirm it isn't "
+                    "already connected to a phone/app (BLE serves one client), and keep it in "
+                    "range. MESH-API will connect automatically once it appears.")
         elif "no powered bluetooth" in low or "rf-kill" in low or "rfkill" in low:
             hint = ("No usable Bluetooth adapter — power it on / unblock rfkill "
                     "(`rfkill unblock bluetooth`) and ensure the bluetooth service is running.")
@@ -548,6 +602,34 @@ class MeshCoreManager:
                 pass
             self._ble_pin_file = None
 
+    def _ble_recover(self, hard: bool = False) -> None:
+        """Clear stale BlueZ state so a fresh BLE connect can succeed after a drop.
+
+        When a MeshCore BLE link drops ungracefully, BlueZ can keep the device in a
+        half-connected state, so every subsequent create_ble() fails with
+        'Failed to connect to device' and the link never returns. Telling BlueZ to
+        disconnect the device (and, on repeated failures, power-cycling the adapter)
+        resets that state. Linux-only, best-effort, non-fatal.
+        """
+        if platform.system() != "Linux":
+            return
+        addr = (self._config.get("ble_address", "") or "").strip()
+        try:
+            if hard:
+                # Last-resort: bounce the adapter to clear a wedged controller.
+                self._log("BLE recovery: power-cycling the Bluetooth adapter.")
+                subprocess.run(["bluetoothctl", "power", "off"], timeout=10,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(1)
+                subprocess.run(["bluetoothctl", "power", "on"], timeout=10,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+                time.sleep(1)
+            if addr:
+                subprocess.run(["bluetoothctl", "disconnect", addr], timeout=10,
+                               stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception as exc:
+            self._log(f"BLE recovery step failed (non-fatal): {exc}")
+
     def _stop_ble_pairing_agent(self) -> None:
         proc = self._ble_agent_proc
         self._ble_agent_proc = None
@@ -559,41 +641,85 @@ class MeshCoreManager:
         # Never leave the cleartext-PIN file behind.
         self._remove_ble_pin_file()
 
-    async def _ble_diagnostic_scan(self) -> None:
-        """Best-effort BLE scan (when disconnected) to report whether the target
-        node is visible and at what signal strength — the single most useful thing
-        for diagnosing a BLE bring-up. Throttled and non-fatal."""
-        if not MESHCORE_AVAILABLE:
-            return
+    async def _ble_scan_present(self) -> bool:
+        """Scan for the target MeshCore node and update the diagnostic (found/rssi).
+
+        Returns True if the node is advertising (so a connect is worth attempting),
+        False if it isn't visible. Used both to gate connect attempts and to feed the
+        WebUI's signal/why-not-connected display. On scan error, returns True so we
+        don't wrongly block a connect. Non-fatal.
+        """
         now = time.time()
-        if now - self._last_ble_scan < 25:
-            return
         self._last_ble_scan = now
+        if not MESHCORE_AVAILABLE:
+            return True
         try:
             from bleak import BleakScanner
         except Exception:
-            return
-        want_addr = (self._config.get("ble_address", "") or "").strip().lower()
+            return True
+        want = (self._config.get("ble_address", "") or "").strip()
+        # ble_address accepts an address OR a name fragment (unified
+        # companion/repeater units advertise the node's own name, not
+        # "MeshCore-*", and can come up on a new MAC after a firmware change).
+        want_addr = want.lower() if ":" in want else ""
+        want_name = want.lower() if (want and ":" not in want) else ""
+        timeout = self._num(self._config.get("ble_scan_timeout_sec"), 7.0, float)
+        # The MeshCore companion session runs over Nordic UART (NUS); a device
+        # advertising it is a MeshCore-capable node regardless of its name.
+        NUS_UUID = "6e400001-b5a3-f393-e0a9-e50e24dcca9e"
+        # Meshtastic's BLE service — exclude those from "MeshCore-looking".
+        MESHTASTIC_UUID = "6ba1b218-15a8-461f-9fa8-5dcae273eafd"
+        # Optional adapter override (e.g. "hci1" for a USB BT5 dongle — BT4.x
+        # onboard radios cannot see BLE5 extended advertising at all).
+        adapter = (self._config.get("ble_adapter", "") or "").strip() or None
         found = None
+        found_dev = None
+        candidates = []
+        scan_ok = True
         try:
-            devs = await BleakScanner.discover(timeout=6.0, return_adv=True)
+            kwargs = {"timeout": timeout, "return_adv": True}
+            if adapter:
+                kwargs["adapter"] = adapter
+            devs = await BleakScanner.discover(**kwargs)
             for addr, (d, adv) in devs.items():
                 name = (getattr(adv, "local_name", None) or getattr(d, "name", None) or "")
+                uuids = [str(u).lower() for u in (getattr(adv, "service_uuids", None) or [])]
+                looks_meshcore = (name.startswith("MeshCore")
+                                  or (NUS_UUID in uuids and MESHTASTIC_UUID not in uuids))
                 is_target = False
                 if want_addr and str(addr).lower() == want_addr:
                     is_target = True
-                elif not want_addr and name.startswith("MeshCore"):
+                elif want_name and want_name in name.lower():
+                    is_target = True
+                elif not want and looks_meshcore:
                     is_target = True
                 if is_target:
                     found = {"found": True, "rssi": getattr(adv, "rssi", None),
                              "name": name or None, "address": str(addr),
-                             "scanned_ts": now}
+                             "scanned_ts": now, "candidates": []}
+                    found_dev = d
                     break
+                if looks_meshcore:
+                    candidates.append({"address": str(addr), "name": name or None,
+                                       "rssi": getattr(adv, "rssi", None)})
         except Exception as exc:
-            self._log(f"BLE diagnostic scan error: {exc}")
+            self._log(f"BLE scan error (non-fatal): {exc}")
+            scan_ok = False
+        if found:
+            self._ble_resolved = {"address": found["address"], "name": found["name"]}
+            self._ble_resolved_device = found_dev
         with self._ble_diag_lock:
             self._ble_diag = found or {"found": False, "rssi": None, "name": None,
-                                       "address": None, "scanned_ts": now}
+                                       "address": None, "scanned_ts": now,
+                                       "candidates": candidates[:5]}
+        if not found and candidates and time.time() - self._last_absent_log >= 120:
+            names = ", ".join(f"{c['address']} ({c['name'] or 'no name'}, "
+                              f"{c['rssi']}dBm)" for c in candidates[:3])
+            self._log(f"configured MeshCore node not seen, but MeshCore-capable "
+                      f"device(s) nearby: {names} — if one is your node, update "
+                      f"BLE Address/Name (or clear it for auto-scan).")
+        # If we couldn't scan at all, don't block the connect attempt.
+        return bool(found) or (not scan_ok)
 
     async def _interruptible_sleep(self, seconds: float) -> None:
         """Sleep that wakes early if a stop is requested."""
@@ -619,7 +745,14 @@ class MeshCoreManager:
                     max_reconnect_attempts=(max_attempts if max_attempts > 0 else None),
                 )
             elif conn_type == "ble":
-                addr = cfg.get("ble_address", "") or None
+                addr = (cfg.get("ble_address", "") or "").strip() or None
+                # If the configured value is blank or a NAME, connect to the
+                # address our scan resolved — the lib's own name filter only
+                # matches "MeshCore-*" and would miss unified units.
+                if (not addr or ":" not in addr) and self._ble_resolved:
+                    addr = self._ble_resolved["address"]
+                    self._log(f"resolved MeshCore node "
+                              f"{self._ble_resolved.get('name') or ''} -> {addr}")
                 pin = cfg.get("ble_pin", "") or None
                 # v0.7.5.0: ensure a system BlueZ pairing agent is present so the
                 # meshcore lib's client.pair() has something to supply the passkey
@@ -628,7 +761,15 @@ class MeshCoreManager:
                 if pin:
                     self._ensure_ble_pairing_agent(str(pin), addr)
                 self._log(f"connecting via BLE {addr or '(scan)'}…")
-                if pin:
+                # Prefer the BLEDevice from our own scan: it pins the connection
+                # to the adapter that actually saw the node (ble_adapter), which
+                # a bare-address connect would not.
+                dev = self._ble_resolved_device
+                if dev is not None and self._ble_resolved \
+                        and self._ble_resolved.get("address") == addr:
+                    coro = MeshCore.create_ble(device=dev,
+                                               pin=(str(pin) if pin else None))
+                elif pin:
                     coro = MeshCore.create_ble(addr, pin=str(pin))
                 else:
                     coro = MeshCore.create_ble(addr)
@@ -691,6 +832,13 @@ class MeshCoreManager:
                 p = getattr(dq, "payload", None)
                 if isinstance(p, dict):
                     self._device_info = p
+                    # Log what we're talking to — model/fw/role makes unified
+                    # companion+repeater units identifiable at a glance.
+                    ident = ", ".join(f"{k}={p[k]}" for k in
+                                      ("model", "ver", "firmware_version", "fw_version",
+                                       "role", "manuf_name") if p.get(k))
+                    if ident:
+                        self._log(f"device: {ident}")
         except Exception as exc:
             self._log(f"could not fetch device info: {exc}")
         await self._refresh_contacts()
@@ -748,17 +896,31 @@ class MeshCoreManager:
                 self._mc.subscribe(evt, self._on_contact_change)
 
     async def _teardown_connection(self) -> None:
-        if not self._mc:
-            return
-        try:
-            await self._mc.stop_auto_message_fetching()
-        except Exception:
-            pass
-        try:
-            await self._mc.disconnect()
-        except Exception:
-            pass
+        mc = self._mc
         self._mc = None
+        if not mc:
+            return
+
+        async def _do_teardown():
+            try:
+                await mc.stop_auto_message_fetching()
+            except Exception:
+                pass
+            try:
+                await mc.disconnect()
+            except Exception:
+                pass
+
+        # Bound the teardown: on a dead/wedged BLE link, disconnect() can block on a
+        # BlueZ D-Bus call for minutes, which previously stalled the whole reconnect
+        # loop. Never let cleanup hold the loop hostage.
+        timeout = self._num(self._config.get("teardown_timeout_sec"), 8.0, float)
+        try:
+            await asyncio.wait_for(_do_teardown(), timeout=timeout)
+        except asyncio.TimeoutError:
+            self._log(f"teardown timed out after {timeout}s; forcing reconnect.")
+        except Exception:
+            pass
 
     async def _shutdown(self) -> None:
         await self._teardown_connection()

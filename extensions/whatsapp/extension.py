@@ -43,7 +43,7 @@ class WhatsAppExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.1.0"
 
     # ------------------------------------------------------------------
     # Config accessors
@@ -93,8 +93,14 @@ class WhatsAppExtension(BaseExtension):
 
     @property
     def inbound_channel_index(self):
+        """Optional mesh-channel filter. None (shipped default) = no filter:
+        forward every channel (GitHub #59)."""
         val = self.config.get("inbound_channel_index")
         return int(val) if val is not None else None
+
+    def _channel_ok(self, ch_idx) -> bool:
+        """True when *ch_idx* passes the optional channel filter."""
+        return self.inbound_channel_index is None or ch_idx == self.inbound_channel_index
 
     @property
     def webhook_path(self) -> str:
@@ -257,22 +263,26 @@ class WhatsAppExtension(BaseExtension):
 
         # send_all: forward non-AI messages from the watched channel
         if self.send_all and not is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._send_whatsapp(message)
             return
 
         # send_ai: forward AI responses from the watched channel
         if self.send_ai and is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._send_whatsapp(message)
 
     def on_message(self, message: str, metadata: dict | None = None) -> None:
         """Observer hook — forward mesh messages to WhatsApp when send_all is on."""
         if not self.send_all:
             return
+        if message.startswith("[WA:"):
+            # Our own WhatsApp->mesh relay coming back (MQTT/bridge echo) —
+            # never forward it to WhatsApp again.
+            return
         metadata = metadata or {}
         ch_idx = metadata.get("channel_idx")
-        if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+        if self._channel_ok(ch_idx):
             sender = metadata.get("sender_info", "Unknown")
             self._send_whatsapp(f"*{sender}*: {message}")
 

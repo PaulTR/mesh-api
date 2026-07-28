@@ -37,10 +37,12 @@ Bidirectional bridge between Meshtastic mesh and a Discord channel.
 | `webhook_url` | string | `""` | Discord webhook URL for outbound messages |
 | `bot_token` | string | `""` | Bot token for reading Discord messages |
 | `channel_id` | string | `""` | Discord channel ID to bridge |
-| `poll_interval_seconds` | int | `5` | How often to poll for new Discord messages |
-| `forward_to_mesh` | bool | `true` | Forward Discord messages to mesh |
-| `mesh_channel_index` | int | `0` | Mesh channel to bridge |
-| `bot_name` | string | `"MESH-API"` | Display name for webhook posts |
+| `send_all` | bool | `false` | Forward all mesh messages to Discord |
+| `send_ai` | bool | `false` | Forward AI responses to Discord |
+| `send_emergency` | bool | `false` | Post emergency alerts to Discord |
+| `receive_enabled` | bool | `true` | Accept inbound Discord messages |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Discord, and Discord→mesh relays on channel 0. Set an index to pin both directions to one channel. |
+| `response_channel_index` | int\|null | `null` | Reserved for AI response routing |
 
 **Hooks:** `on_message` (forwards mesh→Discord), `on_emergency` (posts alerts), Flask route `/discord_webhook`.
 
@@ -63,9 +65,11 @@ Bidirectional Slack integration using Bot API and incoming webhooks.
 | `webhook_url` | string | `""` | Incoming webhook URL for outbound messages |
 | `channel_id` | string | `""` | Slack channel ID to bridge |
 | `poll_interval_seconds` | int | `10` | Polling interval for new messages |
-| `forward_to_mesh` | bool | `true` | Forward Slack messages to mesh |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
-| `bot_name` | string | `"MESH-API"` | Bot display name |
+| `send_all` | bool | `false` | Forward all mesh messages to Slack |
+| `send_ai` | bool | `false` | Forward AI responses to Slack |
+| `send_emergency` | bool | `false` | Post emergency alerts to Slack |
+| `receive_enabled` | bool | `true` | Poll Slack and relay messages to the mesh |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Slack, and Slack→mesh relays on channel 0. Set an index to pin both directions to one channel. |
 
 **Hooks:** `on_message`, `on_emergency`.
 
@@ -87,9 +91,11 @@ Bidirectional Telegram bot bridge using the Bot API with `getUpdates` long-polli
 | `bot_token` | string | `""` | Telegram Bot API token from @BotFather |
 | `chat_id` | string | `""` | Target chat/group/channel ID |
 | `poll_interval_seconds` | int | `5` | Polling interval |
-| `forward_to_mesh` | bool | `true` | Forward Telegram→mesh |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
-| `parse_mode` | string | `"HTML"` | Telegram parse mode |
+| `send_all` | bool | `false` | Forward all mesh messages to Telegram |
+| `send_ai` | bool | `false` | Forward AI responses to Telegram |
+| `send_emergency` | bool | `false` | Post emergency alerts to Telegram |
+| `receive_enabled` | bool | `true` | Poll Telegram and relay messages to the mesh |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Telegram, and Telegram→mesh relays on channel 0. Set an index to pin both directions to one channel. |
 | `allow_commands` | bool | `false` | If true, a Telegram message starting with `/` is run through the command pipeline and the reply is sent back to Telegram — so `/ai <question>`, `/whereami`, etc. work from Telegram. Ordinary chat is still **not** auto-answered by the AI (echo-loop protection). `/ai`, `/ask`, `/bot` query the AI directly (Telegram convenience; the mesh AI alias is randomized). |
 
 **Hooks:** `on_message`, `on_emergency`.
@@ -112,10 +118,12 @@ Bidirectional Matrix (Element) bridge using the Client-Server API.
 | `homeserver_url` | string | `""` | Matrix homeserver (e.g. `https://matrix.org`) |
 | `access_token` | string | `""` | Matrix access token |
 | `room_id` | string | `""` | Room ID to bridge (`!abc:matrix.org`) |
-| `user_id` | string | `""` | Bot user ID (`@bot:matrix.org`) |
 | `poll_interval_seconds` | int | `5` | Sync polling interval |
-| `forward_to_mesh` | bool | `true` | Forward Matrix→mesh |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
+| `send_all` | bool | `false` | Forward all mesh messages to Matrix |
+| `send_ai` | bool | `false` | Forward AI responses to Matrix |
+| `send_emergency` | bool | `false` | Post emergency alerts to Matrix |
+| `receive_enabled` | bool | `true` | Sync Matrix and relay messages to the mesh |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Matrix, and Matrix→mesh relays on channel 0. Set an index to pin both directions to one channel. |
 
 **Hooks:** `on_message`, `on_emergency`.
 
@@ -134,12 +142,15 @@ Bidirectional Signal bridge using the signal-cli-rest-api.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | bool | `false` | Enable the extension |
-| `signal_api_url` | string | `"http://localhost:8080"` | signal-cli REST API URL |
-| `phone_number` | string | `""` | Registered Signal phone number |
+| `signal_cli_rest_url` | string | `"http://localhost:8080"` | signal-cli REST API URL |
+| `sender_number` | string | `""` | Registered Signal phone number |
 | `recipient` | string | `""` | Recipient number or group ID |
 | `poll_interval_seconds` | int | `5` | Polling interval |
-| `forward_to_mesh` | bool | `true` | Forward Signal→mesh |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
+| `send_all` | bool | `false` | Forward all mesh messages to Signal |
+| `send_ai` | bool | `false` | Forward AI responses to Signal |
+| `send_emergency` | bool | `false` | Send emergency alerts via Signal |
+| `receive_enabled` | bool | `true` | Poll Signal and relay messages to the mesh |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Signal, and Signal→mesh relays on channel 0. Set an index to pin both directions to one channel. |
 
 **Hooks:** `on_message`, `on_emergency`.
 
@@ -167,7 +178,7 @@ Bidirectional WhatsApp bridge using the Meta WhatsApp Business Cloud API. Outbou
 | `send_ai` | bool | `false` | Forward AI responses to WhatsApp |
 | `send_all` | bool | `false` | Forward all mesh messages to WhatsApp |
 | `receive_enabled` | bool | `true` | Accept inbound WhatsApp messages |
-| `inbound_channel_index` | int\|null | `null` | Mesh channel filter for outbound |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter for outbound. `null` = no filter: every channel is forwarded to WhatsApp. |
 | `webhook_path` | string | `"/whatsapp/webhook"` | Flask endpoint for Meta webhook |
 | `broadcast_channel_index` | int | `0` | Mesh channel for inbound messages |
 | `bot_name` | string | `"MESH-API"` | Bot display name |
@@ -199,10 +210,12 @@ Bidirectional Mattermost bridge using REST API + incoming webhook.
 | `access_token` | string | `""` | Personal access token or bot token |
 | `channel_id` | string | `""` | Channel ID to bridge |
 | `webhook_url` | string | `""` | Incoming webhook URL |
-| `poll_interval_seconds` | int | `10` | Polling interval |
-| `forward_to_mesh` | bool | `true` | Forward Mattermost→mesh |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
-| `bot_name` | string | `"MESH-API"` | Bot display name |
+| `poll_interval_seconds` | int | `5` | Polling interval |
+| `send_all` | bool | `false` | Forward all mesh messages to Mattermost |
+| `send_ai` | bool | `false` | Forward AI responses to Mattermost |
+| `send_emergency` | bool | `false` | Post emergency alerts to Mattermost |
+| `receive_enabled` | bool | `true` | Poll Mattermost and relay messages to the mesh |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Mattermost, and Mattermost→mesh relays on channel 0. Set an index to pin both directions to one channel. |
 
 **Hooks:** `on_message`, `on_emergency`.
 
@@ -221,10 +234,15 @@ Outbound message forwarding to Zello Work PTT channels.
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | bool | `false` | Enable the extension |
-| `api_url` | string | `""` | Zello Work API URL |
+| `api_url` | string | `"https://zello.io/api"` | Zello Work API URL |
 | `api_token` | string | `""` | Zello API token |
 | `channel_name` | string | `""` | Target Zello channel |
-| `forward_mesh_messages` | bool | `true` | Forward mesh→Zello |
+| `username` | string | `""` | Zello username |
+| `password` | string | `""` | Zello password |
+| `send_all` | bool | `false` | Forward all mesh messages to Zello |
+| `send_ai` | bool | `false` | Forward AI responses to Zello |
+| `send_emergency` | bool | `false` | Send emergency alerts to Zello |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is forwarded to Zello. |
 
 **Hooks:** `on_message`, `on_emergency`.
 
@@ -247,13 +265,17 @@ Bidirectional MQTT messaging with JSON payloads and optional TLS.
 | `broker_port` | int | `1883` | MQTT broker port |
 | `username` | string | `""` | MQTT username |
 | `password` | string | `""` | MQTT password |
-| `topic_publish` | string | `"mesh-api/outbound"` | Publish topic |
-| `topic_subscribe` | string | `"mesh-api/inbound"` | Subscribe topic |
-| `topic_emergency` | string | `"mesh-api/emergency"` | Emergency topic |
 | `use_tls` | bool | `false` | Enable TLS |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
-| `qos` | int | `1` | MQTT QoS level |
 | `client_id` | string | `"mesh-api"` | MQTT client ID |
+| `publish_topic` | string | `"mesh/outbound"` | Publish topic (mesh→MQTT) |
+| `subscribe_topic` | string | `"mesh/inbound"` | Subscribe topic (MQTT→mesh) |
+| `emergency_topic` | string | `"mesh/emergency"` | Emergency topic |
+| `send_all` | bool | `false` | Publish all mesh messages |
+| `send_ai` | bool | `false` | Publish AI responses |
+| `send_emergency` | bool | `false` | Publish emergency alerts |
+| `receive_enabled` | bool | `true` | Subscribe and relay MQTT→mesh |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is published, and MQTT→mesh relays on channel 0. Set an index to pin both directions to one channel. |
+| `qos` | int | `1` | MQTT QoS level |
 
 **Hooks:** `on_message`, `on_emergency`.
 
@@ -275,10 +297,16 @@ Fully configurable bidirectional HTTP webhook with HMAC verification.
 | `outbound_url` | string | `""` | URL to POST outbound messages to |
 | `outbound_method` | string | `"POST"` | HTTP method |
 | `outbound_headers` | object | `{}` | Custom headers |
-| `outbound_template` | string | `""` | JSON body template (`{message}`, `{sender}` placeholders) |
-| `hmac_secret` | string | `""` | HMAC-SHA256 secret for inbound verification |
-| `inbound_message_field` | string | `"message"` | JSON field containing the message |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
+| `outbound_template` | string | JSON template | Outbound body template (`{{message}}` placeholder) |
+| `send_all` | bool | `false` | Fire webhook for all mesh messages |
+| `send_ai` | bool | `false` | Fire webhook for AI responses |
+| `send_emergency` | bool | `false` | Fire webhook for emergency alerts |
+| `receive_enabled` | bool | `true` | Accept inbound webhook posts |
+| `receive_endpoint` | string | `"/webhook/mesh"` | Flask endpoint for inbound posts |
+| `receive_secret` | string | `""` | Shared secret for inbound verification |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel fires the webhook, and inbound posts relay on channel 0. Set an index to pin both directions to one channel. |
+| `message_field` | string | `"message"` | JSON field containing the message |
+| `sender_field` | string | `"sender"` | JSON field containing the sender |
 
 **Hooks:** `on_message`, `on_emergency`. Flask route for inbound webhooks.
 
@@ -299,15 +327,15 @@ Inbound email monitoring with subject/sender filtering.
 | `enabled` | bool | `false` | Enable the extension |
 | `imap_server` | string | `""` | IMAP server hostname |
 | `imap_port` | int | `993` | IMAP port |
-| `username` | string | `""` | Email username |
-| `password` | string | `""` | Email password |
+| `imap_username` | string | `""` | Email username |
+| `imap_password` | string | `""` | Email password |
 | `use_ssl` | bool | `true` | Use SSL/TLS |
-| `folder` | string | `"INBOX"` | Mailbox folder |
+| `mailbox` | string | `"INBOX"` | Mailbox folder |
 | `poll_interval_seconds` | int | `60` | Polling interval |
 | `subject_filter` | string | `""` | Only forward emails matching this subject |
 | `sender_filter` | string | `""` | Only forward emails from this sender |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
-| `max_body_length` | int | `250` | Max message body length |
+| `inbound_channel_index` | int\|null | `null` | Mesh channel for forwarded email (`null` = channel 0) |
+| `max_body_length` | int | `200` | Max message body length |
 | `mark_as_read` | bool | `true` | Mark processed emails as read |
 
 **Hooks:** `on_emergency` (none — inbound only).
@@ -371,7 +399,7 @@ Bidirectional [n8n](https://n8n.io) workflow automation bridge — forward mesh 
 | `receive_enabled` | bool | `true` | Accept inbound messages from n8n |
 | `receive_endpoint` | string | `"/n8n/webhook"` | Flask endpoint for inbound n8n messages |
 | `receive_secret` | string | `""` | Secret for inbound webhook verification |
-| `inbound_channel_index` | int\|null | `null` | Mesh channel filter for outbound |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter for outbound; also the default channel for inbound payloads that omit `channel_index` (`null` = channel 0) |
 | `message_field` | string | `"message"` | JSON field name for the message body |
 | `sender_field` | string | `"sender"` | JSON field name for the sender |
 | `include_metadata` | bool | `true` | Include node metadata in outbound payloads |
@@ -404,10 +432,12 @@ Universal notification gateway supporting 100+ services through URL-based config
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `enabled` | bool | `false` | Enable the extension |
-| `apprise_urls` | array | `[]` | List of Apprise notification URLs |
-| `notify_on_emergency` | bool | `true` | Auto-notify on emergency |
-| `default_title` | string | `"MESH-API"` | Notification title |
-| `default_type` | string | `"info"` | Notification type (`info`, `warning`, `failure`, `success`) |
+| `urls` | array | `[]` | List of Apprise notification URLs |
+| `send_all` | bool | `false` | Notify for all mesh messages |
+| `send_ai` | bool | `false` | Notify for AI responses |
+| `send_emergency` | bool | `true` | Notify on emergency |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel triggers notifications. |
+| `title_prefix` | string | `"[MESH-API]"` | Notification title prefix |
 
 Apprise URL examples: `slack://token`, `telegram://bot_token/chat_id`, `discord://webhook_id/webhook_token`, etc. See [Apprise docs](https://github.com/caronc/apprise/wiki) for 100+ supported services.
 
@@ -430,12 +460,14 @@ Push notifications via [ntfy.sh](https://ntfy.sh) with SSE-based inbound subscri
 | `enabled` | bool | `false` | Enable the extension |
 | `server_url` | string | `"https://ntfy.sh"` | ntfy server URL |
 | `topic` | string | `""` | ntfy topic name |
-| `token` | string | `""` | Access token (optional) |
+| `access_token` | string | `""` | Access token (optional) |
 | `priority` | int | `3` | Default priority (1-5) |
-| `tags` | string | `"mesh,meshtastic"` | Comma-separated tags |
-| `notify_on_emergency` | bool | `true` | Auto-notify on emergency |
-| `subscribe_inbound` | bool | `false` | Subscribe for inbound messages |
-| `broadcast_channel_index` | int | `0` | Mesh channel index |
+| `tags` | string | `"satellite_antenna"` | Comma-separated tags |
+| `send_all` | bool | `false` | Push all mesh messages |
+| `send_ai` | bool | `false` | Push AI responses |
+| `send_emergency` | bool | `true` | Push emergency alerts |
+| `inbound_channel_index` | int\|null | `null` | Dual role: outbound channel filter (`null` = every channel pushed) AND ntfy→mesh opt-in — set an index to enable the SSE subscription, which relays ntfy posts to that mesh channel. |
+| `emergency_priority` | int | `5` | Priority for emergency pushes |
 
 **Hooks:** `on_emergency`.
 
@@ -456,13 +488,16 @@ Push notifications via the Pushover API with priority levels.
 | `enabled` | bool | `false` | Enable the extension |
 | `api_token` | string | `""` | Pushover application API token |
 | `user_key` | string | `""` | Pushover user/group key |
-| `default_priority` | int | `0` | Default priority (-2 to 2) |
-| `emergency_priority` | int | `2` | Priority for emergency alerts |
-| `default_sound` | string | `"pushover"` | Notification sound |
 | `device` | string | `""` | Target device (blank = all) |
-| `retry` | int | `60` | Retry interval for emergency priority (seconds) |
-| `expire` | int | `3600` | Expiry for emergency priority (seconds) |
-| `notify_on_emergency` | bool | `true` | Auto-notify on emergency |
+| `send_all` | bool | `false` | Push all mesh messages |
+| `send_ai` | bool | `false` | Push AI responses |
+| `send_emergency` | bool | `true` | Push emergency alerts |
+| `inbound_channel_index` | int\|null | `null` | Optional mesh channel filter. `null` = no filter: every channel is pushed. |
+| `priority` | int | `0` | Default priority (-2 to 2) |
+| `emergency_priority` | int | `2` | Priority for emergency alerts |
+| `emergency_retry` | int | `60` | Retry interval for emergency priority (seconds) |
+| `emergency_expire` | int | `3600` | Expiry for emergency priority (seconds) |
+| `sound` | string | `"pushover"` | Notification sound |
 
 **Hooks:** `on_emergency`.
 

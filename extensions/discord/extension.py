@@ -36,7 +36,7 @@ class DiscordExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.1.0"
 
     # ------------------------------------------------------------------
     # Config accessors
@@ -64,8 +64,14 @@ class DiscordExtension(BaseExtension):
 
     @property
     def inbound_channel_index(self):
+        """Optional mesh-channel filter. None (shipped default) = no filter:
+        forward every channel and relay inbound on channel 0 (GitHub #59)."""
         val = self.config.get("inbound_channel_index")
         return int(val) if val is not None else None
+
+    def _channel_ok(self, ch_idx) -> bool:
+        """True when *ch_idx* passes the optional channel filter."""
+        return self.inbound_channel_index is None or ch_idx == self.inbound_channel_index
 
     @property
     def response_channel_index(self):
@@ -135,13 +141,13 @@ class DiscordExtension(BaseExtension):
 
         # send_all: forward messages from the configured inbound channel
         if self.send_all and not is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._post_webhook(message)
             return
 
         # send_ai: forward AI responses back to Discord
         if self.send_ai and is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._post_webhook(message)
 
     def on_message(self, message: str, metadata: dict | None = None) -> None:
@@ -151,7 +157,7 @@ class DiscordExtension(BaseExtension):
         metadata = metadata or {}
         ch_idx = metadata.get("channel_idx")
 
-        if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+        if self._channel_ok(ch_idx):
             sender = metadata.get("sender_info", "Unknown")
             self._post_webhook(f"**{sender}**: {message}")
 
@@ -203,20 +209,10 @@ class DiscordExtension(BaseExtension):
                     log_fn("Discord", formatted_message, direct=False,
                            channel_idx=int(channel_index) if channel_index is not None else 0)
 
-                # Route to every active radio (Meshtastic + MeshCore) via the
-                # network-agnostic web_send helper; fall back to Meshtastic-only.
-                web_send = ext.app_context.get("web_send")
-                if web_send and channel_index is not None:
-                    web_send(formatted_message, "auto", "broadcast",
-                             channel_idx=int(channel_index))
-                else:
-                    iface = ext.app_context.get("interface")
-                    if iface is None:
-                        ext.log("❌ Cannot route Discord message: interface is None.")
-                    else:
-                        send_fn = ext.app_context.get("send_broadcast_chunks")
-                        if send_fn and channel_index is not None:
-                            send_fn(iface, formatted_message, int(channel_index))
+                # Route via the shared helper: honors default_send_network,
+                # reaches every active radio, and defaults to channel 0 when
+                # no inbound_channel_index is configured (#59).
+                ext.send_to_mesh(formatted_message, channel_index=channel_index)
 
                 ext.log(f"✅ Routed Discord message on channel {channel_index}")
                 return jsonify({"status": "sent",
@@ -268,23 +264,12 @@ class DiscordExtension(BaseExtension):
                                 log_fn("DiscordPoll", formatted,
                                        direct=False,
                                        channel_idx=self.inbound_channel_index)
-                            # Route to every active radio (Meshtastic +
-                            # MeshCore) via web_send; fall back to MT-only.
-                            web_send = self.app_context.get("web_send")
-                            if web_send and self.inbound_channel_index is not None:
-                                web_send(formatted, "auto", "broadcast",
-                                         channel_idx=int(self.inbound_channel_index))
-                            else:
-                                iface = self.app_context.get("interface")
-                                if iface is None:
-                                    self.log("❌ Cannot send polled Discord "
-                                             "message: interface is None.")
-                                else:
-                                    send_fn = self.app_context.get(
-                                        "send_broadcast_chunks")
-                                    if send_fn and self.inbound_channel_index is not None:
-                                        send_fn(iface, formatted,
-                                                self.inbound_channel_index)
+                            # Route via the shared helper: honors
+                            # default_send_network and defaults to channel 0
+                            # when no inbound_channel_index is set (#59).
+                            self.send_to_mesh(
+                                formatted,
+                                channel_index=self.inbound_channel_index)
                             self.log(f"Polled and routed Discord message: "
                                      f"{formatted}")
                             last_message_id = msg["id"]

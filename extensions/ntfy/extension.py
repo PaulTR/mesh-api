@@ -36,7 +36,7 @@ class NtfyExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.1.0"
 
     # ------------------------------------------------------------------
     # Config accessors
@@ -81,8 +81,16 @@ class NtfyExtension(BaseExtension):
 
     @property
     def inbound_channel_index(self):
+        """Mesh-channel filter AND ntfy->mesh opt-in. None (shipped default):
+        outbound forwards every channel (no filter), and the ntfy->mesh SSE
+        subscription stays OFF. Set an index to enable inbound relay pinned
+        to that channel (GitHub #59)."""
         val = self.config.get("inbound_channel_index")
         return int(val) if val is not None else None
+
+    def _channel_ok(self, ch_idx) -> bool:
+        """True when *ch_idx* passes the optional channel filter."""
+        return self.inbound_channel_index is None or ch_idx == self.inbound_channel_index
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -124,20 +132,24 @@ class NtfyExtension(BaseExtension):
         ch_idx = metadata.get("channel_idx")
 
         if self.send_all and not is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._publish(message, title="Mesh Message")
             return
 
         if self.send_ai and is_ai:
-            if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+            if self._channel_ok(ch_idx):
                 self._publish(message, title="AI Response")
 
     def on_message(self, message: str, metadata: dict | None = None) -> None:
         if not self.send_all:
             return
+        if message.startswith("[Ntfy"):
+            # Our own ntfy->mesh relay coming back — never forward it to
+            # ntfy again (would ping the same topic in a loop).
+            return
         metadata = metadata or {}
         ch_idx = metadata.get("channel_idx")
-        if self.inbound_channel_index is not None and ch_idx == self.inbound_channel_index:
+        if self._channel_ok(ch_idx):
             sender = metadata.get("sender_info", "Unknown")
             self._publish(f"{sender}: {message}", title="Mesh Message")
 

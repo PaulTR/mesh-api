@@ -33,7 +33,7 @@ class ImapExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.1.0"
 
     # ------------------------------------------------------------------
     # Config accessors
@@ -174,9 +174,10 @@ class ImapExtension(BaseExtension):
                             log_fn("IMAP", formatted, direct=False,
                                    channel_idx=self.inbound_channel_index)
 
-                        if self.inbound_channel_index is not None:
-                            self.send_to_mesh(formatted,
-                                              channel_index=self.inbound_channel_index)
+                        # None index = relay on default channel 0 instead of
+                        # silently dropping the email (GitHub #59).
+                        self.send_to_mesh(formatted,
+                                          channel_index=self.inbound_channel_index)
 
                         self.log(f"Forwarded email from {sender}: {subject}")
 
