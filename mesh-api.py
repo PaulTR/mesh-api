@@ -3,6 +3,7 @@ import meshtastic.serial_interface
 from meshtastic import BROADCAST_ADDR
 from pubsub import pub
 import json
+import subprocess
 import requests
 import time
 from datetime import datetime, timedelta, timezone  # Added timezone import
@@ -1175,39 +1176,53 @@ def send_to_home_assistant(user_message):
         print(f"⚠️ HA request failed: {e}")
         return None
 
-def get_ai_response(prompt):
-    if AI_PROVIDER == "lmstudio":
-        return send_to_lmstudio(prompt)
-    elif AI_PROVIDER == "openai":
-        return send_to_openai(prompt)
-    elif AI_PROVIDER == "ollama":
-        return send_to_ollama(prompt)
-    elif AI_PROVIDER == "claude":
-        return send_to_claude(prompt)
-    elif AI_PROVIDER == "gemini":
-        return send_to_gemini(prompt)
-    elif AI_PROVIDER == "grok":
-        return send_to_grok(prompt)
-    elif AI_PROVIDER == "openrouter":
-        return send_to_openrouter(prompt)
-    elif AI_PROVIDER == "groq":
-        return send_to_groq(prompt)
-    elif AI_PROVIDER == "deepseek":
-        return send_to_deepseek(prompt)
-    elif AI_PROVIDER == "mistral":
-        return send_to_mistral(prompt)
-    elif AI_PROVIDER == "openai_compatible":
-        return send_to_openai_compatible(prompt)
-    elif AI_PROVIDER == "home_assistant":
-        # Delegate to the Home Assistant extension if loaded, else fall back to built-in
-        if extension_loader:
-            ha_ext = extension_loader.get_ai_provider("home_assistant")
-            if ha_ext:
-                return ha_ext.get_ai_response(prompt)
-        return send_to_home_assistant(prompt)
-    else:
-        print(f"⚠️ Unknown AI provider: {AI_PROVIDER}")
-        return None
+def get_ai_response(text):
+    import ollama
+    import subprocess
+    import json
+
+    # 1. Load config
+    with open('config.json', 'r') as f:
+        conf = json.load(f)
+
+    model_name = conf.get('ollama_model', 'gemma3:4b')
+    system_msg = conf.get('system_prompt', '')
+
+    try:
+        # 2. Native chat WITHOUT the broken 'tools' parameter
+        response = ollama.chat(
+            model=model_name,
+            messages=[
+                {'role': 'system', 'content': system_msg},
+                {'role': 'user', 'content': text},
+            ],
+        )
+
+        full_reply = response['message']['content']
+
+        # 3. Check if the AI included the wave tag
+        if "[ACTION_WAVE]" in full_reply:
+            print("--- TRIGGERING WAVE VIA PATTERN MATCHING ---")
+
+            # The ROS 2 command for Innate Mars
+            ros_cmd = [
+                "ros2", "action", "send_goal", "/execute_skill",
+                "brain_messages/action/ExecuteSkill",
+                "{skill_type: 'innate-os/wave', inputs: '{}'}"
+            ]
+
+            # Run the wave in the background
+            subprocess.Popen(ros_cmd)
+
+            # Clean up the reply so the user doesn't see the [ACTION_WAVE] tag
+            clean_reply = full_reply.replace("[ACTION_WAVE]", "").strip()
+            return clean_reply if clean_reply else "I am waving at you! 👋"
+
+        return full_reply
+
+    except Exception as e:
+        print(f"Ollama Error: {e}")
+        return "Beep boop. (Local AI Error)"
 
 def send_discord_message(content):
     if not (ENABLE_DISCORD and DISCORD_WEBHOOK_URL):
