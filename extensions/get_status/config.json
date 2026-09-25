@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "response_text": "This is a status update",
+  "keywords": [
+    "status",
+    "statuses"
+  ],
+  "respond_to_direct": true,
+  "respond_to_broadcast": true,
+  "enable_commands": true
+}
