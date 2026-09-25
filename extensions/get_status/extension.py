@@ -10,6 +10,7 @@ Zero hardcoded values: always queried directly from ROS on every report.
 import json
 import os
 import re
+import shutil
 import subprocess
 import sys
 import urllib.request
@@ -107,6 +108,11 @@ class GetStatusExtension(BaseExtension):
             "robot_state": "operational",
         }
 
+    def log(self, message: str) -> None:
+        """Log to console and core logger."""
+        print(f"[ext:{self.name}] {message}", flush=True)
+        super().log(message)
+
     def _fetch_ros_battery(self) -> dict | None:
         """Query ROS 2 live right now for current battery state."""
         # 1. Try reading from status file first if a local node maintains it
@@ -120,29 +126,49 @@ class GetStatusExtension(BaseExtension):
             except Exception as e:
                 self.log(f"Notice: error reading {self.status_file}: {e}")
 
-        # 2. Query ROS 2 topic directly via ros2 topic echo
-        source_cmd = self.config.get("ros_source_command", "source /opt/ros/humble/setup.bash 2>/dev/null")
-        cmd = f"{source_cmd}; ros2 topic echo {self.ros_battery_topic} --once"
-        self.log(f"Executing live ROS query: {cmd}")
+        # 2. Query ROS 2 topic directly
+        # Try direct command first, then fallback to sourced shell
+        commands_to_try = []
 
-        try:
-            res = subprocess.run(
-                ["bash", "-c", cmd],
-                capture_output=True,
-                text=True,
-                timeout=6,
-            )
-            if res.returncode == 0 and res.stdout:
-                parsed = self._parse_battery_yaml(res.stdout)
+        # If ros2 is in PATH, try running it directly with inherited environment
+        if shutil.which("ros2"):
+            commands_to_try.append(["ros2", "topic", "echo", self.ros_battery_topic, "--once"])
+
+        # Sourced shell invocation (handles zsh/bash and Zenoh RMW env)
+        source_cmd = self.config.get("ros_source_command", "source /opt/ros/humble/setup.bash 2>/dev/null")
+        shell_script = (
+            "source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null; "
+            f"{source_cmd}; "
+            f"ros2 topic echo {self.ros_battery_topic} --once"
+        )
+        commands_to_try.append(["bash", "-c", shell_script])
+
+        timeout_sec = int(self.config.get("ros_timeout_seconds", 15))
+
+        for cmd in commands_to_try:
+            cmd_display = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
+            self.log(f"Executing live ROS query ({timeout_sec}s timeout): {cmd_display[:80]}...")
+            try:
+                res = subprocess.run(
+                    cmd,
+                    capture_output=True,
+                    text=True,
+                    timeout=timeout_sec,
+                )
+                output = (res.stdout or "") + "\n" + (res.stderr or "")
+                parsed = self._parse_battery_yaml(output)
                 if parsed:
-                    self.log(f"Live ROS reading succeeded: {parsed.get('battery_percentage')}% ({parsed.get('voltage')}V)")
+                    self.log(
+                        f"Live ROS reading succeeded: {parsed.get('battery_percentage')}% "
+                        f"({parsed.get('voltage')}V, {parsed.get('power_supply_status')})"
+                    )
                     return parsed
-            else:
-                self.log(f"⚠️ ros2 topic echo error: {res.stderr.strip()[:120]}")
-        except subprocess.TimeoutExpired:
-            self.log(f"⚠️ Timeout waiting for {self.ros_battery_topic}")
-        except Exception as exc:
-            self.log(f"⚠️ Error running ROS query: {exc}")
+                else:
+                    self.log(f"ROS query returned code {res.returncode}. Output snippet: {output.strip()[:140]}")
+            except subprocess.TimeoutExpired:
+                self.log(f"⚠️ Timeout ({timeout_sec}s) waiting for ROS topic {self.ros_battery_topic}")
+            except Exception as exc:
+                self.log(f"⚠️ Error running ROS query: {exc}")
 
         return None
 
