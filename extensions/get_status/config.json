@@ -1,11 +1,11 @@
 {
   "enabled": true,
-  "response_text": "This is a status update",
-  "keywords": [
-    "status",
-    "statuses"
-  ],
-  "respond_to_direct": true,
-  "respond_to_broadcast": true,
+  "tool_name": "get_status",
+  "tool_description": "Retrieve live robot telemetry, battery level, temperature, and diagnostics.",
+  "status_data": {
+    "battery": 30,
+    "temperature": 21,
+    "status": "operational"
+  },
   "enable_commands": true
 }

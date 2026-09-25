@@ -1,19 +1,23 @@
 """Get Status extension for MESH-API.
 
-Provides automated robot status updates over the mesh network.
-Intercepts incoming status-related plain-text messages and responds with
-a status update ("This is a status update" by default), while allowing
-all other conversations (such as 'hello world') to pass through to the
-Gemma AI model undisturbed.
+Integrates robot status updates into the Gemma LLM workflow using tool/function calling.
+When a user asks for a status or diagnostic report, Gemma invokes the 'get_status' tool.
+The extension executes get_robot_status_data() to collect a telemetry dictionary
+(e.g., {"battery": 30, "temperature": 21, "status": "operational"}), passes it back to
+Gemma, and Gemma parses it into a natural, formatted response for the user.
 """
 
+import json
 import re
 import sys
+import urllib.request
+import urllib.error
+
 from extensions.base_extension import BaseExtension
 
 
 class GetStatusExtension(BaseExtension):
-    """Extension providing robot status updates via plain-text keyword matching."""
+    """Extension providing 2-turn Gemma tool-calling integration for robot telemetry."""
 
     @property
     def name(self) -> str:
@@ -21,37 +25,41 @@ class GetStatusExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.0.0"
+        return "1.2.0"
 
     # ── Registered Commands ──────────────────────────────────────────────
     @property
     def commands(self) -> dict:
-        """Register optional slash commands for status if enabled in config."""
+        """Register optional slash commands for direct status access."""
         if self.config.get("enable_commands", True):
             return {
-                "/status": "Get robot status update",
-                "/get_status": "Get robot status update (alias)",
+                "/status": "Get robot status report",
+                "/get_status": "Get robot status report (alias)",
             }
         return {}
 
-    # ── Status Message & Keyword Properties ──────────────────────────────
+    # ── Status Data Properties ───────────────────────────────────────────
     @property
-    def status_message(self) -> str:
-        """Configured status response text."""
-        return self.config.get("response_text", "This is a status update")
+    def tool_name(self) -> str:
+        """Name of the tool exposed to Gemma."""
+        return self.config.get("tool_name", "get_status")
 
     @property
-    def keywords(self) -> list[str]:
-        """List of words/phrases that trigger a status update."""
-        return self.config.get("keywords", ["status", "statuses"])
+    def tool_description(self) -> str:
+        """Description of the tool provided to Gemma."""
+        return self.config.get(
+            "tool_description",
+            "Retrieve live robot telemetry, battery level, temperature, and diagnostics."
+        )
 
-    def get_robot_status(self, node_info: dict | None = None) -> str:
-        """Generate the status update text.
+    def get_robot_status_data(self, node_info: dict | None = None) -> dict:
+        """Collect and return structured robot telemetry.
 
-        Currently returns the configured response text ("This is a status update").
-        Expand this method in the future to include dynamic robot telemetry
-        (e.g., battery percentage, GPS position, ROS topics, hardware health,
-        sensor readings, etc.).
+        Returns a dictionary containing robot metrics such as battery percentage,
+        temperature, operational status, etc.
+
+        Expand this method to connect to your real robot sensors, ROS topics,
+        power management boards, or GPS devices!
 
         Parameters
         ----------
@@ -60,43 +68,48 @@ class GetStatusExtension(BaseExtension):
 
         Returns
         -------
-        str
-            The status string to transmit back over the mesh.
+        dict
+            Structured telemetry data to feed back to Gemma.
         """
         # =====================================================================
-        # TODO: Expand robot telemetry here as needed.
-        # Example expansion:
-        #   battery = self._read_battery_level()
-        #   return f"{self.status_message} | Battery: {battery}%"
+        # TODO: Expand live robot telemetry here.
+        # Example:
+        #   return {
+        #       "battery": self.read_battery_percent(),
+        #       "temperature": self.read_core_temperature(),
+        #       "motors": "nominal",
+        #       "ros_nodes_active": 14,
+        #   }
         # =====================================================================
-        return self.status_message
+        default_data = {
+            "battery": 30,
+            "temperature": 21,
+            "status": "operational",
+        }
+        return self.config.get("status_data", default_data)
 
-    def _is_status_query(self, text: str) -> bool:
-        """Check if incoming text contains any status-related keywords."""
-        if not text:
-            return False
-
-        # Normalize text: lowercase and treat underscores as spaces
-        clean_text = text.lower().replace("_", " ")
-
-        for kw in self.keywords:
-            cleaned_kw = kw.lower().strip().replace("_", " ")
-            if not cleaned_kw:
-                continue
-            # Match whole-word boundary so "status" won't falsely match "statutory"
-            pattern = r"\b" + re.escape(cleaned_kw) + r"\b"
-            if re.search(pattern, clean_text):
-                return True
-        return False
+    def format_status_fallback(self, data: dict) -> str:
+        """Format the telemetry dictionary as a clean string for slash commands or fallbacks."""
+        parts = []
+        if "battery" in data:
+            parts.append(f"Battery: {data['battery']}%")
+        if "temperature" in data:
+            parts.append(f"Temp: {data['temperature']}°C")
+        if "status" in data:
+            parts.append(f"Status: {data['status']}")
+        for k, v in data.items():
+            if k not in ("battery", "temperature", "status"):
+                parts.append(f"{k.capitalize()}: {v}")
+        return " | ".join(parts) if parts else "Robot status nominal."
 
     # ── Lifecycle Hooks ──────────────────────────────────────────────────
     def on_load(self) -> None:
-        """Set up status keyword interceptor on load."""
+        """Set up AI tool wrapper on load."""
         self._patched_modules: list[tuple[object, object]] = []
         self._orig_ctx_fn = None
         self.log(
             f"Get Status extension loaded (v{self.version}). "
-            f"Keywords: {self.keywords}"
+            f"Tool '{self.tool_name}' active."
         )
         self._install_ai_interceptor()
 
@@ -107,15 +120,7 @@ class GetStatusExtension(BaseExtension):
 
     # ── AI Pipeline Interception ─────────────────────────────────────────
     def _install_ai_interceptor(self) -> None:
-        """Hook into the core get_ai_response pipeline.
-
-        This ensures that when a plain-text status query (e.g. 'status' or
-        'what is your status?') is sent directly to the robot, this extension
-        responds immediately with the robot status update, preventing the Gemma
-        model from being needlessly called while preserving normal AI chat
-        for everything else (like 'hello world').
-        """
-        # Target modules where get_ai_response lives
+        """Hook into the core get_ai_response pipeline."""
         target_names = ["__main__", "mesh-api"]
         for mod_name in target_names:
             mod = sys.modules.get(mod_name)
@@ -124,10 +129,8 @@ class GetStatusExtension(BaseExtension):
                 if not getattr(orig_fn, "_is_get_status_wrapper", False):
                     def make_wrapper(original_fn):
                         def wrapper(prompt, provider=None, endpoint=None):
-                            if self.enabled and self.config.get("respond_to_direct", True):
-                                if self._is_status_query(prompt):
-                                    self.log(f"Intercepted status query: '{prompt}'")
-                                    return self.get_robot_status()
+                            if self.enabled:
+                                return self._query_gemma_with_tools(prompt, original_fn)
                             return original_fn(prompt, provider=provider, endpoint=endpoint)
                         wrapper._is_get_status_wrapper = True
                         wrapper._original_fn = original_fn
@@ -136,18 +139,15 @@ class GetStatusExtension(BaseExtension):
                     wrapped_fn = make_wrapper(orig_fn)
                     setattr(mod, "get_ai_response", wrapped_fn)
                     self._patched_modules.append((mod, orig_fn))
-                    self.log(f"Hooked status interceptor into {mod_name}.get_ai_response")
+                    self.log(f"Hooked status tool into {mod_name}.get_ai_response")
 
-        # Also hook app_context's get_ai_response if present
         if "get_ai_response" in self.app_context:
             orig_ctx_fn = self.app_context["get_ai_response"]
             if not getattr(orig_ctx_fn, "_is_get_status_wrapper", False):
                 def make_ctx_wrapper(original_fn):
                     def wrapper(prompt, provider=None, endpoint=None):
-                        if self.enabled and self.config.get("respond_to_direct", True):
-                            if self._is_status_query(prompt):
-                                self.log(f"Intercepted status query via app_context: '{prompt}'")
-                                return self.get_robot_status()
+                        if self.enabled:
+                            return self._query_gemma_with_tools(prompt, original_fn)
                         return original_fn(prompt, provider=provider, endpoint=endpoint)
                     wrapper._is_get_status_wrapper = True
                     wrapper._original_fn = original_fn
@@ -169,59 +169,169 @@ class GetStatusExtension(BaseExtension):
             self.app_context["get_ai_response"] = self._orig_ctx_fn
             self._orig_ctx_fn = None
 
-    # ── Command & Message Hooks ──────────────────────────────────────────
+    # ── Gemma 2-Turn Tool Calling Execution ──────────────────────────────
+    def _query_gemma_with_tools(self, prompt: str, orig_fn) -> str | None:
+        """Handle 2-turn function calling with Gemma:
+        
+        Turn 1: Send prompt + get_status tool definition to Ollama /api/chat.
+        Turn 2: If Gemma invokes get_status, execute get_robot_status_data(),
+                pass the JSON back to Gemma, and let Gemma formulate the final response.
+        """
+        main_cfg = self.app_context.get("config", {})
+        provider = (main_cfg.get("ai_provider") or "ollama").lower()
+
+        if provider != "ollama":
+            return orig_fn(prompt)
+
+        raw_url = main_cfg.get("ollama_url", "http://localhost:11434/api/generate")
+        chat_url = self.config.get("ollama_chat_url") or raw_url.replace("/api/generate", "/api/chat")
+        model = main_cfg.get("ollama_model", "gemma4:e2b-it-qat")
+        timeout = int(main_cfg.get("ollama_timeout", 180))
+        keep_alive = main_cfg.get("ollama_keep_alive", "10m")
+        options = main_cfg.get("ollama_options", {})
+        max_len = self.app_context.get("MAX_RESPONSE_LENGTH", 200)
+        sanitize_fn = self.app_context.get("sanitize_model_output")
+
+        base_system_prompt = main_cfg.get(
+            "system_prompt",
+            "You are a helpful assistant responding to mesh network chats. Keep replies concise."
+        )
+        system_instruction = (
+            f"{base_system_prompt}\n"
+            f"You have access to a tool named '{self.tool_name}'. "
+            f"Call {self.tool_name} whenever the user asks for status, reports, "
+            f"health, diagnostics, telemetry, or battery state. "
+            f"When you receive the status data, parse it and formulate a clear, concise report for the user."
+        )
+
+        tools = [
+            {
+                "type": "function",
+                "function": {
+                    "name": self.tool_name,
+                    "description": self.tool_description,
+                    "parameters": {
+                        "type": "object",
+                        "properties": {},
+                        "required": [],
+                    },
+                },
+            }
+        ]
+
+        messages = [
+            {"role": "system", "content": system_instruction},
+            {"role": "user", "content": prompt},
+        ]
+
+        payload = {
+            "model": model,
+            "messages": messages,
+            "tools": tools,
+            "stream": False,
+            "keep_alive": keep_alive,
+            "options": options,
+        }
+
+        try:
+            # ── Turn 1: Send user message to Gemma with tools ────────────
+            req = urllib.request.Request(
+                chat_url,
+                data=json.dumps(payload).encode("utf-8"),
+                headers={"Content-Type": "application/json"},
+                method="POST"
+            )
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                data = json.loads(resp.read().decode("utf-8"))
+
+            msg = data.get("message", {})
+            tool_calls = msg.get("tool_calls") or []
+            content = msg.get("content", "").strip()
+
+            # Check if Gemma invoked get_status natively
+            invoked_natively = any(
+                call.get("function", {}).get("name") == self.tool_name
+                for call in tool_calls
+            )
+
+            # Check if Gemma invoked get_status via tag fallback
+            tag_pattern = rf"(\[CALL:{re.escape(self.tool_name)}\]|<tool_call>{re.escape(self.tool_name)}.*?</tool_call>|\bcall:{re.escape(self.tool_name)}\b|\b{re.escape(self.tool_name)}\(\))"
+            invoked_via_tag = bool(re.search(tag_pattern, content, re.IGNORECASE))
+
+            if invoked_natively or invoked_via_tag:
+                # ── Collect live robot telemetry dictionary ──────────────
+                status_dict = self.get_robot_status_data()
+                status_json = json.dumps(status_dict)
+                self.log(f"Gemma requested status. Telemetry: {status_json}")
+
+                # ── Turn 2: Feed data back to Gemma to formulate response
+                messages.append(msg)
+                messages.append({
+                    "role": "tool",
+                    "content": status_json
+                })
+
+                # In case model prefers explicit user role on Turn 2:
+                payload["messages"] = messages
+                # Remove tools in Turn 2 to encourage final text output
+                payload.pop("tools", None)
+
+                try:
+                    req2 = urllib.request.Request(
+                        chat_url,
+                        data=json.dumps(payload).encode("utf-8"),
+                        headers={"Content-Type": "application/json"},
+                        method="POST"
+                    )
+                    with urllib.request.urlopen(req2, timeout=timeout) as resp2:
+                        data2 = json.loads(resp2.read().decode("utf-8"))
+
+                    turn2_content = data2.get("message", {}).get("content", "").strip()
+                    if turn2_content:
+                        clean_turn2 = sanitize_fn(turn2_content) if sanitize_fn else turn2_content
+                        self.log(f"Gemma formatted status response: '{clean_turn2}'")
+                        return clean_turn2[:max_len]
+                except Exception as t2_err:
+                    self.log(f"Turn 2 formatting error ({t2_err}), using formatted telemetry fallback")
+                    return self.format_status_fallback(status_dict)
+
+                # Fallback if Gemma returned empty text on Turn 2
+                return self.format_status_fallback(status_dict)
+
+            # Gemma decided no status check was needed (e.g. 'hello world')
+            clean_content = sanitize_fn(content) if sanitize_fn else content
+            return (clean_content if clean_content else "🤖 [No response]")[:max_len]
+
+        except Exception as exc:
+            self.log(f"⚠️ Ollama /api/chat failed ({exc}), falling back to core AI")
+
+        # Fallback to original provider on error
+        return orig_fn(prompt)
+
+    # ── Command & Channel Hooks ──────────────────────────────────────────
     def handle_command(self, command: str, args: str, node_info: dict) -> str | None:
         """Handle slash commands like /status or /get_status."""
         if not self.enabled:
             return None
         cmd_lower = command.lower()
         if cmd_lower in ("/status", "/get_status"):
+            data = self.get_robot_status_data(node_info)
             self.log(f"Handled command '{command}' from {node_info.get('shortname', '?')}")
-            return self.get_robot_status(node_info)
+            return self.format_status_fallback(data)
         return None
 
     def handle_channel_message(self, text: str, node_info: dict) -> str | None:
         """Handle plain-text traffic on an assigned agent channel."""
         if not self.enabled:
             return None
-        if self._is_status_query(text):
-            self.log(f"Handled channel agent status query from {node_info.get('shortname', '?')}: '{text}'")
-            return self.get_robot_status(node_info)
-        return None
-
-    def on_message(self, message: str, metadata: dict | None = None) -> None:
-        """Observe inbound mesh messages and handle broadcast queries if needed."""
-        if not self.enabled:
-            return
-        if not self._is_status_query(message):
-            return
-
-        metadata = metadata or {}
-        is_direct = metadata.get("is_direct", False)
-
-        # Direct messages are handled cleanly by the AI interceptor.
-        # Slash commands are handled cleanly by handle_command.
-        if is_direct or message.strip().startswith("/"):
-            return
-
-        # Check if the channel already has a channel agent assigned
-        ch_idx = int(metadata.get("channel_idx") or 0)
-        channel_agents = self.app_context.get("config", {}).get("channel_agents", {})
-        if str(ch_idx) in channel_agents:
-            # Channel agent route will handle it
-            return
-
-        # Reply to broadcast queries on channels when enabled
-        if self.config.get("respond_to_broadcast", True):
-            self.log(f"Replying to broadcast status query on channel {ch_idx}: '{message}'")
-            self.send_to_mesh(self.get_robot_status(), channel_index=ch_idx)
+        return self._query_gemma_with_tools(text, lambda p: None)
 
     # ── MCP Tools (v0.7.0+) ──────────────────────────────────────────────
     def get_mcp_tools(self) -> list[dict]:
         """Expose get_status tool to external AI agents via MCP."""
         return [{
-            "name": "get_status",
-            "description": "Get the current robot status update.",
+            "name": self.tool_name,
+            "description": self.tool_description,
             "inputSchema": {
                 "type": "object",
                 "properties": {},
@@ -230,6 +340,6 @@ class GetStatusExtension(BaseExtension):
 
     def call_mcp_tool(self, name: str, arguments: dict) -> str:
         """Handle execution of the get_status MCP tool."""
-        if name == "get_status":
-            return self.get_robot_status()
+        if name == self.tool_name:
+            return json.dumps(self.get_robot_status_data())
         return f"Unknown tool: {name}"

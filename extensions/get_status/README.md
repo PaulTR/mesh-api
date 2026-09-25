@@ -1,34 +1,49 @@
 # Get Status Extension for MESH-API
 
-An automated robot status extension for MESH-API.
+An automated robot status extension with **2-turn Gemma LLM Function Calling** for MESH-API.
 
-## Overview
+## How the Workflow Works
 
-This extension intercepts incoming messages containing status-related keywords (such as `status`, `statuses`, `what is your status?`, `robot status`) and responds with `"This is a status update"`.
+```
+1. User sends message: "Send a report", "What is your status?", "How are systems holding up?"
+                          │
+                          ▼
+2. Gemma receives prompt with tool definition:
+   Tool: get_status()
+                          │
+                          ▼
+3. Gemma analyzes user intent semantically. If status is needed, Gemma issues tool call:
+   get_status()
+                          │
+                          ▼
+4. Extension executes get_robot_status_data():
+   Returns telemetry dict: {"battery": 30, "temperature": 21, "status": "operational"}
+                          │
+                          ▼
+5. Telemetry dict is passed back to Gemma in Turn 2.
+                          │
+                          ▼
+6. Gemma parses the data and formulates a natural, conversational response:
+   "Battery is at 30% and temperature is 21°C. All systems are operational."
+                          │
+                          ▼
+7. Response is transmitted back over the mesh!
+```
 
-All other conversations (such as `hello world`, general queries, etc.) pass through directly to your Gemma AI model without interference.
-
-## Features
-
-- **Keyword Interception:** Plain-text detection using word-boundary matching so words like `status` match while unrelated words like `statutory` or `apparatus` are ignored.
-- **AI Pass-Through:** Skips calling the LLM (Gemma) when status is requested, saving robot compute, power, and radio bandwidth.
-- **Multi-Radio Compatible:** Works across Meshtastic and MeshCore.
-- **Optional Slash Commands:** Supports `/status` and `/get_status`.
-- **Channel Agent Support:** Implements `handle_channel_message` for dedicated robot status channels.
-- **MCP Tool:** Auto-exposes `get_status` tool for AI agents and the MCP server.
+If the user sends general chatter (e.g., `"hello world"`), Gemma determines no tool is needed and responds directly without calling `get_status`.
 
 ## Configuration (`config.json`)
 
 ```json
 {
   "enabled": true,
-  "response_text": "This is a status update",
-  "keywords": [
-    "status",
-    "statuses"
-  ],
-  "respond_to_direct": true,
-  "respond_to_broadcast": true,
+  "tool_name": "get_status",
+  "tool_description": "Retrieve live robot telemetry, battery level, temperature, and diagnostics.",
+  "status_data": {
+    "battery": 30,
+    "temperature": 21,
+    "status": "operational"
+  },
   "enable_commands": true
 }
 ```
@@ -36,20 +51,24 @@ All other conversations (such as `hello world`, general queries, etc.) pass thro
 | Key | Type | Default | Description |
 |---|---|---|---|
 | `enabled` | boolean | `true` | Enable or disable the extension |
-| `response_text` | string | `"This is a status update"` | The status message returned to the user |
-| `keywords` | list[str] | `["status", "statuses"]` | Words or phrases that trigger the status response |
-| `respond_to_direct` | boolean | `true` | Intercept direct messages sent to the robot |
-| `respond_to_broadcast` | boolean | `true` | Reply to status queries received on public/group channels |
+| `tool_name` | string | `"get_status"` | Name of the tool exposed to Gemma |
+| `tool_description` | string | `"Retrieve live robot telemetry..."` | Prompt hint guiding Gemma when to call the tool |
+| `status_data` | dict | `{"battery": 30, ...}` | Default mock telemetry data |
 | `enable_commands` | boolean | `true` | Register `/status` and `/get_status` slash commands |
 
-## Expanding Robot Telemetry
+## Connecting to Real Robot Hardware
 
-To add live robot data (such as battery percentage, ROS topics, GPS, or uptime), edit `get_robot_status()` in [`extension.py`](extension.py):
+To feed real sensor readings to Gemma, edit [get_robot_status_data](file:///Users/paul/Documents/code/mesh-api/extensions/get_status/extension.py#L52-L84) in [extensions/get_status/extension.py](file:///Users/paul/Documents/code/mesh-api/extensions/get_status/extension.py):
 
 ```python
-def get_robot_status(self, node_info: dict | None = None) -> str:
-    # Example: query your robot's battery or sensor API
-    # battery = read_battery_level()
-    # return f"{self.status_message} | Battery: {battery}%"
-    return self.status_message
+def get_robot_status_data(self, node_info: dict | None = None) -> dict:
+    # Example reading from your robot's hardware / ROS:
+    return {
+        "battery": self.read_battery_percent(),
+        "temperature": self.read_core_temperature(),
+        "motors": "nominal",
+        "ros_nodes_active": 14,
+        "gps": {"lat": 37.7749, "lon": -122.4194}
+    }
 ```
+Gemma receives this entire dictionary and dynamically highlights the metrics in its response to the user.
