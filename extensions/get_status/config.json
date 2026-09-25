@@ -1,11 +1,10 @@
 {
   "enabled": true,
   "tool_name": "get_status",
-  "tool_description": "Retrieve live robot telemetry, battery level, temperature, and diagnostics.",
-  "status_data": {
-    "battery": 30,
-    "temperature": 21,
-    "status": "operational"
-  },
+  "tool_description": "Retrieve live robot telemetry, battery percentage, voltage, and diagnostics.",
+  "ros_battery_topic": "/battery_state",
+  "ros_source_command": "source /opt/ros/humble/setup.bash 2>/dev/null",
+  "status_file": "/tmp/robot_status.json",
+  "poll_interval_seconds": 15,
   "enable_commands": true
 }

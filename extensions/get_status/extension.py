@@ -1,15 +1,19 @@
 """Get Status extension for MESH-API.
 
-Integrates robot status updates into the Gemma LLM workflow using tool/function calling.
-When a user asks for a status or diagnostic report, Gemma invokes the 'get_status' tool.
-The extension executes get_robot_status_data() to collect a telemetry dictionary
-(e.g., {"battery": 30, "temperature": 21, "status": "operational"}), passes it back to
-Gemma, and Gemma parses it into a natural, formatted response for the user.
+Integrates robot battery and telemetry into the Gemma LLM workflow using tool/function calling.
+When a user asks for battery, status, or diagnostics (e.g. "what's my battery percentage?"),
+Gemma invokes the 'get_status' tool.
+The extension queries the live ROS 2 topic /battery_state (e.g. on Innate MARS robot),
+passes the parsed telemetry to Gemma, and Gemma formulates a natural, formatted response.
 """
 
 import json
+import os
 import re
+import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import urllib.error
 
@@ -17,7 +21,7 @@ from extensions.base_extension import BaseExtension
 
 
 class GetStatusExtension(BaseExtension):
-    """Extension providing 2-turn Gemma tool-calling integration for robot telemetry."""
+    """Extension providing 2-turn Gemma tool-calling with live ROS 2 /battery_state telemetry."""
 
     @property
     def name(self) -> str:
@@ -25,7 +29,7 @@ class GetStatusExtension(BaseExtension):
 
     @property
     def version(self) -> str:
-        return "1.2.0"
+        return "1.3.0"
 
     # ── Registered Commands ──────────────────────────────────────────────
     @property
@@ -33,12 +37,12 @@ class GetStatusExtension(BaseExtension):
         """Register optional slash commands for direct status access."""
         if self.config.get("enable_commands", True):
             return {
-                "/status": "Get robot status report",
-                "/get_status": "Get robot status report (alias)",
+                "/status": "Get robot battery and telemetry report",
+                "/get_status": "Get robot battery report (alias)",
             }
         return {}
 
-    # ── Status Data Properties ───────────────────────────────────────────
+    # ── Tool & Config Properties ─────────────────────────────────────────
     @property
     def tool_name(self) -> str:
         """Name of the tool exposed to Gemma."""
@@ -49,72 +53,186 @@ class GetStatusExtension(BaseExtension):
         """Description of the tool provided to Gemma."""
         return self.config.get(
             "tool_description",
-            "Retrieve live robot telemetry, battery level, temperature, and diagnostics."
+            "Retrieve live robot telemetry, battery percentage, voltage, and diagnostics."
         )
 
-    def get_robot_status_data(self, node_info: dict | None = None) -> dict:
-        """Collect and return structured robot telemetry.
+    @property
+    def ros_battery_topic(self) -> str:
+        """ROS 2 topic publishing BatteryState."""
+        return self.config.get("ros_battery_topic", "/battery_state")
 
-        Returns a dictionary containing robot metrics such as battery percentage,
-        temperature, operational status, etc.
+    @property
+    def status_file(self) -> str:
+        """Optional file where a dedicated ROS node might dump telemetry."""
+        return self.config.get("status_file", "/tmp/robot_status.json")
 
-        Expand this method to connect to your real robot sensors, ROS topics,
-        power management boards, or GPS devices!
+    # ── ROS 2 Telemetry Ingestion ────────────────────────────────────────
+    def _parse_battery_yaml(self, raw_text: str) -> dict | None:
+        """Extract battery fields from 'ros2 topic echo /battery_state --once' output."""
+        if not raw_text:
+            return None
 
-        Parameters
-        ----------
-        node_info : dict, optional
-            Information about the requesting mesh node (e.g. shortname, node_id).
+        # Extract percentage (e.g. percentage: 0.044607844203710556)
+        m_pct = re.search(r"percentage:\s*([0-9.]+)", raw_text)
+        if not m_pct:
+            return None
 
-        Returns
-        -------
-        dict
-            Structured telemetry data to feed back to Gemma.
-        """
-        # =====================================================================
-        # TODO: Expand live robot telemetry here.
-        # Example:
-        #   return {
-        #       "battery": self.read_battery_percent(),
-        #       "temperature": self.read_core_temperature(),
-        #       "motors": "nominal",
-        #       "ros_nodes_active": 14,
-        #   }
-        # =====================================================================
-        default_data = {
-            "battery": 30,
-            "temperature": 21,
-            "status": "operational",
+        pct_raw = float(m_pct.group(1))
+        # In ROS 2 BatteryState, percentage is 0.0 to 1.0 (or 0 to 100)
+        if pct_raw <= 1.0:
+            pct_val = round(pct_raw * 100, 1)
+        else:
+            pct_val = round(pct_raw, 1)
+
+        # Extract voltage
+        m_volt = re.search(r"voltage:\s*([0-9.]+)", raw_text)
+        volt_val = round(float(m_volt.group(1)), 2) if m_volt else None
+
+        # Extract power supply status
+        m_status = re.search(r"power_supply_status:\s*([0-9]+)", raw_text)
+        status_map = {
+            1: "charging",
+            2: "discharging",
+            3: "not charging",
+            4: "full",
         }
-        return self.config.get("status_data", default_data)
+        status_val = status_map.get(int(m_status.group(1)), "discharging") if m_status else "discharging"
+
+        # Extract cell voltages if available
+        # Format in yaml:
+        # cell_voltage:
+        # - 3.573333263397217
+        cells_match = re.search(r"cell_voltage:\s*\n((?:\s*-\s*[0-9.]+\n?)+)", raw_text)
+        cells = []
+        if cells_match:
+            cells = [round(float(c), 2) for c in re.findall(r"-\s*([0-9.]+)", cells_match.group(1))]
+
+        return {
+            "battery_percentage": pct_val,
+            "voltage": volt_val,
+            "power_supply_status": status_val,
+            "cells": cells if cells else None,
+            "robot_state": "operational",
+        }
+
+    def _fetch_ros_battery(self) -> dict | None:
+        """Fetch battery telemetry from /tmp/robot_status.json or by querying ROS 2 directly."""
+        # 1. Try reading from status file first (fastest, 0ms)
+        if os.path.exists(self.status_file):
+            try:
+                with open(self.status_file, "r") as f:
+                    data = json.load(f)
+                if data and "battery" in data or "battery_percentage" in data:
+                    return data
+            except Exception as e:
+                self.log(f"Notice: could not read {self.status_file}: {e}")
+
+        # 2. Query ROS 2 topic directly using subprocess
+        source_cmd = self.config.get("ros_source_command", "source /opt/ros/humble/setup.bash 2>/dev/null")
+        cmd = f"{source_cmd}; ros2 topic echo {self.ros_battery_topic} --once"
+
+        try:
+            res = subprocess.run(
+                ["bash", "-c", cmd],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            if res.returncode == 0 and res.stdout:
+                parsed = self._parse_battery_yaml(res.stdout)
+                if parsed:
+                    return parsed
+            else:
+                self.log(f"ros2 topic echo stderr: {res.stderr.strip()[:100]}")
+        except subprocess.TimeoutExpired:
+            self.log(f"Timeout querying {self.ros_battery_topic}")
+        except Exception as exc:
+            self.log(f"Error querying ROS 2: {exc}")
+
+        return None
+
+    def _poll_loop(self) -> None:
+        """Background thread updating cached battery telemetry every poll interval."""
+        interval = max(5, int(self.config.get("poll_interval_seconds", 15)))
+        self.log(f"Battery polling thread started (interval: {interval}s, topic: {self.ros_battery_topic})")
+
+        while not self._stop_event.is_set():
+            data = self._fetch_ros_battery()
+            if data:
+                self._cached_battery_data = data
+            self._stop_event.wait(interval)
+
+        self.log("Battery polling thread stopped.")
+
+    def get_robot_status_data(self, node_info: dict | None = None) -> dict:
+        """Return the latest structured robot telemetry for Gemma."""
+        # Return cached data if available
+        if hasattr(self, "_cached_battery_data") and self._cached_battery_data:
+            return self._cached_battery_data
+
+        # Fallback to direct query
+        fresh_data = self._fetch_ros_battery()
+        if fresh_data:
+            self._cached_battery_data = fresh_data
+            return fresh_data
+
+        # Safe default if ROS topic is unreachable
+        return {
+            "battery_percentage": 0,
+            "voltage": 0.0,
+            "power_supply_status": "offline/unknown",
+            "robot_state": "connecting to ROS",
+        }
 
     def format_status_fallback(self, data: dict) -> str:
-        """Format the telemetry dictionary as a clean string for slash commands or fallbacks."""
-        parts = []
-        if "battery" in data:
-            parts.append(f"Battery: {data['battery']}%")
-        if "temperature" in data:
-            parts.append(f"Temp: {data['temperature']}°C")
-        if "status" in data:
-            parts.append(f"Status: {data['status']}")
-        for k, v in data.items():
-            if k not in ("battery", "temperature", "status"):
-                parts.append(f"{k.capitalize()}: {v}")
-        return " | ".join(parts) if parts else "Robot status nominal."
+        """Format the telemetry dictionary as a clean string for slash commands."""
+        pct = data.get("battery_percentage", data.get("battery", "?"))
+        volt = data.get("voltage")
+        status = data.get("power_supply_status", data.get("status", "unknown"))
+
+        msg = f"Battery: {pct}%"
+        if volt:
+            msg += f" ({volt}V)"
+        if status:
+            msg += f" [{status}]"
+
+        cells = data.get("cells")
+        if cells:
+            msg += f" | Cells: {cells}"
+        return msg
 
     # ── Lifecycle Hooks ──────────────────────────────────────────────────
     def on_load(self) -> None:
-        """Set up AI tool wrapper on load."""
+        """Set up AI tool wrapper and background battery polling thread."""
         self._patched_modules: list[tuple[object, object]] = []
         self._orig_ctx_fn = None
-        self.log(
-            f"Get Status extension loaded (v{self.version}). "
-            f"Tool '{self.tool_name}' active."
-        )
+        self._cached_battery_data: dict | None = None
+        self._stop_event = threading.Event()
+
+        # Prime the cache on startup
+        threading.Thread(target=self._prime_cache, daemon=True).start()
+
+        # Start periodic poller
+        self._poll_thread = threading.Thread(target=self._poll_loop, daemon=True)
+        self._poll_thread.start()
+
+        self.log(f"Get Status extension loaded (v{self.version}). Tool '{self.tool_name}' active.")
         self._install_ai_interceptor()
 
+    def _prime_cache(self) -> None:
+        """Perform an initial battery read shortly after launch."""
+        time.sleep(1)
+        data = self._fetch_ros_battery()
+        if data:
+            self._cached_battery_data = data
+            pct = data.get("battery_percentage")
+            volt = data.get("voltage")
+            self.log(f"Initial battery reading captured: {pct}% ({volt}V)")
+
     def on_unload(self) -> None:
-        """Clean up interceptors on unload."""
+        """Clean up threads and interceptors on unload."""
+        if hasattr(self, "_stop_event"):
+            self._stop_event.set()
         self._remove_ai_interceptor()
         self.log("Get Status extension unloaded.")
 
@@ -174,7 +292,7 @@ class GetStatusExtension(BaseExtension):
         """Handle 2-turn function calling with Gemma:
         
         Turn 1: Send prompt + get_status tool definition to Ollama /api/chat.
-        Turn 2: If Gemma invokes get_status, execute get_robot_status_data(),
+        Turn 2: If Gemma invokes get_status, collect live battery data,
                 pass the JSON back to Gemma, and let Gemma formulate the final response.
         """
         main_cfg = self.app_context.get("config", {})
@@ -199,9 +317,9 @@ class GetStatusExtension(BaseExtension):
         system_instruction = (
             f"{base_system_prompt}\n"
             f"You have access to a tool named '{self.tool_name}'. "
-            f"Call {self.tool_name} whenever the user asks for status, reports, "
-            f"health, diagnostics, telemetry, or battery state. "
-            f"When you receive the status data, parse it and formulate a clear, concise report for the user."
+            f"Call {self.tool_name} whenever the user asks for battery level, status, reports, "
+            f"health, diagnostics, or power state. "
+            f"When you receive the battery and telemetry data, parse it and formulate a clear, concise report for the user."
         )
 
         tools = [
@@ -259,7 +377,7 @@ class GetStatusExtension(BaseExtension):
             invoked_via_tag = bool(re.search(tag_pattern, content, re.IGNORECASE))
 
             if invoked_natively or invoked_via_tag:
-                # ── Collect live robot telemetry dictionary ──────────────
+                # ── Collect live robot battery telemetry ─────────────────
                 status_dict = self.get_robot_status_data()
                 status_json = json.dumps(status_dict)
                 self.log(f"Gemma requested status. Telemetry: {status_json}")
@@ -271,9 +389,7 @@ class GetStatusExtension(BaseExtension):
                     "content": status_json
                 })
 
-                # In case model prefers explicit user role on Turn 2:
                 payload["messages"] = messages
-                # Remove tools in Turn 2 to encourage final text output
                 payload.pop("tools", None)
 
                 try:
