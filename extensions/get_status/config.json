@@ -5,6 +5,5 @@
   "ros_battery_topic": "/battery_state",
   "ros_source_command": "source /opt/ros/humble/setup.bash 2>/dev/null",
   "status_file": "/tmp/robot_status.json",
-  "poll_interval_seconds": 15,
   "enable_commands": true
 }
