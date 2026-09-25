@@ -15,7 +15,7 @@
 
   "nodes_online_window_sec": 7200,
   
-  "serial_port": "/dev/ttyUSB0",
+  "serial_port": "/dev/ttyACM0",
   "serial_baud": 460800,
 
   "_comment_networks_v070": "v0.7.0: MeshCore is now a first-class radio. Run Meshtastic only, MeshCore only (standalone), or both. Set meshtastic_enabled=false to run a MeshCore-only node with no Meshtastic device.",
@@ -92,8 +92,8 @@
   "openai_timeout": 60,
 
   "ollama_url": "http://localhost:11434/api/generate",
-  "ollama_model": "llama3",
-  "ollama_timeout": 60,
+  "ollama_model": "gemma4:e2b-it-qat",
+  "ollama_timeout": 180,
   "ollama_max_parallel": 1,
   "ollama_options": {},
   "ollama_keep_alive": "10m",
