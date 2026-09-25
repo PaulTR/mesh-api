@@ -1,10 +1,11 @@
-"""Get Status extension for MESH-API.
+"""Wave extension for MESH-API.
 
-Integrates robot battery and telemetry into the Gemma LLM workflow using tool/function calling.
-Every time a report is requested, this extension executes a live query to the ROS 2 topic
-/battery_state (e.g. on Innate MARS robot), extracts the real-time battery percentage,
-voltage, and power status, and passes that live data to Gemma to format a response.
-Zero hardcoded values: always queried directly from ROS on every report.
+Enables the Innate MARS robot to physically wave its arm when receiving greetings
+and reply conversationally through the Gemma LLM.
+
+Executes the real Innate OS physical skill (innate-os/wave) non-blockingly via
+the innate CLI or Python handle, and integrates seamlessly into Gemma 2-turn
+function calling.
 """
 
 import json
@@ -13,141 +14,128 @@ import re
 import shutil
 import subprocess
 import sys
+import threading
+import time
 import urllib.request
 import urllib.error
 
 from extensions.base_extension import BaseExtension
 
+GREETING_PATTERN = re.compile(
+    r"\b(hello|hi|hey|howdy|greetings|welcome|good\s+(morning|afternoon|evening)|yo\b|sup\b|wave|salutations|bonjour|hola)\b",
+    re.IGNORECASE,
+)
 
-class GetStatusExtension(BaseExtension):
-    """Extension providing 2-turn Gemma tool-calling with on-demand ROS 2 /battery_state queries."""
+
+class WaveExtension(BaseExtension):
+    """Extension providing physical arm wave actuation for Innate MARS robot on greetings."""
+
+    def __init__(self, extension_dir: str, app_context: dict):
+        super().__init__(extension_dir, app_context)
+        self._last_wave_time = 0.0
+        self._wave_lock = threading.Lock()
+        self._patched_modules: list[tuple[object, object]] = []
+        self._orig_ctx_fn = None
 
     @property
     def name(self) -> str:
-        return "Get Status"
+        return "Wave"
 
     @property
     def version(self) -> str:
-        return "1.4.0"
+        return "1.0.0"
 
     # ── Registered Commands ──────────────────────────────────────────────
     @property
     def commands(self) -> dict:
-        """Register optional slash commands for direct status access."""
+        """Register slash commands for direct wave trigger."""
         if self.config.get("enable_commands", True):
             return {
-                "/status": "Get robot battery and telemetry report",
-                "/get_status": "Get robot battery report (alias)",
+                "/wave": "Physically wave the robot arm and greet back",
             }
         return {}
 
     # ── Tool & Config Properties ─────────────────────────────────────────
     @property
     def tool_name(self) -> str:
-        """Name of the tool exposed to Gemma."""
-        return self.config.get("tool_name", "get_status")
+        return self.config.get("tool_name", "wave")
 
     @property
     def tool_description(self) -> str:
-        """Description of the tool provided to Gemma."""
         return self.config.get(
             "tool_description",
-            "Retrieve live robot telemetry, battery percentage, voltage, and diagnostics."
+            "Physically wave the robot's arm to greet someone. Call this whenever the user "
+            "greets you (hello, hi, hey, greetings, welcome) or asks you to wave.",
         )
 
     @property
-    def ros_battery_topic(self) -> str:
-        """ROS 2 topic publishing BatteryState."""
-        return self.config.get("ros_battery_topic", "/battery_state")
+    def skill_id(self) -> str:
+        """Innate OS skill identifier (default: innate-os/wave)."""
+        return self.config.get("skill_id", "innate-os/wave")
 
     @property
-    def status_file(self) -> str:
-        """Optional file where a dedicated ROS node might dump telemetry."""
-        return self.config.get("status_file", "/tmp/robot_status.json")
+    def wave_command(self) -> str:
+        """Shell command to run the wave skill."""
+        return self.config.get("wave_command", "innate skill run innate-os/wave")
 
-    # ── Live ROS 2 Telemetry Ingestion ───────────────────────────────────
-    def _parse_battery_yaml(self, raw_text: str) -> dict | None:
-        """Extract live battery fields dynamically from ROS 2 output."""
-        if not raw_text:
-            return None
+    @property
+    def cooldown_seconds(self) -> float:
+        """Minimum seconds between physical arm actuations to protect servo motors."""
+        return float(self.config.get("cooldown_seconds", 6.0))
 
-        # Extract percentage dynamically (e.g. percentage: 0.044607844203710556)
-        m_pct = re.search(r"percentage:\s*([0-9.]+)", raw_text)
-        if not m_pct:
-            return None
+    @property
+    def trigger_on_greetings(self) -> bool:
+        """Whether to trigger physical wave on incoming greetings."""
+        return bool(self.config.get("trigger_on_greetings", True))
 
-        pct_raw = float(m_pct.group(1))
-        # In ROS 2 BatteryState, percentage is normalized 0.0 to 1.0 (or 0 to 100)
-        pct_val = round(pct_raw * 100, 1) if pct_raw <= 1.0 else round(pct_raw, 1)
-
-        # Extract voltage dynamically
-        m_volt = re.search(r"voltage:\s*([0-9.]+)", raw_text)
-        volt_val = round(float(m_volt.group(1)), 2) if m_volt else None
-
-        # Extract power supply status dynamically
-        m_status = re.search(r"power_supply_status:\s*([0-9]+)", raw_text)
-        status_map = {
-            1: "charging",
-            2: "discharging",
-            3: "not charging",
-            4: "full",
-        }
-        status_val = status_map.get(int(m_status.group(1)), "discharging") if m_status else "unknown"
-
-        # Extract cell voltages dynamically if present
-        cells_match = re.search(r"cell_voltage:\s*\n((?:\s*-\s*[0-9.]+\n?)+)", raw_text)
-        cells = []
-        if cells_match:
-            cells = [round(float(c), 2) for c in re.findall(r"-\s*([0-9.]+)", cells_match.group(1))]
-
-        return {
-            "battery_percentage": pct_val,
-            "voltage": volt_val,
-            "power_supply_status": status_val,
-            "cells": cells if cells else None,
-            "robot_state": "operational",
-        }
+    @property
+    def fallback_reply(self) -> str:
+        return self.config.get("fallback_reply", "*Waves arm* Hello! It's great to hear from you.")
 
     def log(self, message: str) -> None:
         """Log to console and core logger."""
         print(f"[ext:{self.name}] {message}", flush=True)
         super().log(message)
 
-    def _fetch_ros_battery(self) -> dict | None:
-        """Query ROS 2 live right now for current battery state."""
-        # 1. Try reading from status file first if a local node maintains it
-        if os.path.exists(self.status_file):
-            try:
-                with open(self.status_file, "r") as f:
-                    data = json.load(f)
-                if data and ("battery" in data or "battery_percentage" in data):
-                    self.log(f"Read live telemetry from {self.status_file}")
-                    return data
-            except Exception as e:
-                self.log(f"Notice: error reading {self.status_file}: {e}")
+    # ── Physical Skill Execution ─────────────────────────────────────────
+    def _run_physical_wave(self) -> None:
+        """Execute the real wave skill on Innate OS in background thread."""
+        self.log(f"Starting physical wave actuation for skill '{self.skill_id}'...")
 
-        # 2. Query ROS 2 topic directly
-        # Try direct command first, then fallback to sourced shell
+        # 1. Try Python API handle if innate_skills is installed in environment
+        try:
+            from innate_skills.wave import Wave  # type: ignore
+
+            wave_skill = Wave()
+            if hasattr(wave_skill, "execute"):
+                self.log("Invoking Innate wave skill via Python API handle...")
+                wave_skill.execute()
+                self.log("Innate wave physical motion completed via Python handle.")
+                return
+        except ImportError:
+            pass
+        except Exception as exc:
+            self.log(f"Notice: Python handle invocation failed ({exc}), falling back to CLI")
+
+        # 2. Try Innate CLI execution
         commands_to_try = []
 
-        # If ros2 is in PATH, try running it directly with inherited environment
-        if shutil.which("ros2"):
-            commands_to_try.append(["ros2", "topic", "echo", self.ros_battery_topic, "--once"])
+        # Direct executable invocation if in PATH
+        if shutil.which("innate"):
+            commands_to_try.append(["innate", "skill", "run", self.skill_id])
 
-        # Sourced shell invocation (handles zsh/bash and Zenoh RMW env)
-        source_cmd = self.config.get("ros_source_command", "source /opt/ros/humble/setup.bash 2>/dev/null")
+        # Sourced shell invocation (handles robot user environment, aliases, and ROS setup)
         shell_script = (
             "source ~/.zshrc 2>/dev/null || source ~/.bashrc 2>/dev/null; "
-            f"{source_cmd}; "
-            f"ros2 topic echo {self.ros_battery_topic} --once"
+            f"{self.wave_command}"
         )
         commands_to_try.append(["bash", "-c", shell_script])
 
-        timeout_sec = int(self.config.get("ros_timeout_seconds", 15))
+        timeout_sec = int(self.config.get("wave_timeout_seconds", 15))
 
         for cmd in commands_to_try:
             cmd_display = " ".join(cmd) if isinstance(cmd, list) else str(cmd)
-            self.log(f"Executing live ROS query ({timeout_sec}s timeout): {cmd_display[:80]}...")
+            self.log(f"Executing wave command ({timeout_sec}s timeout): {cmd_display}...")
             try:
                 res = subprocess.run(
                     cmd,
@@ -156,73 +144,65 @@ class GetStatusExtension(BaseExtension):
                     timeout=timeout_sec,
                 )
                 output = (res.stdout or "") + "\n" + (res.stderr or "")
-                parsed = self._parse_battery_yaml(output)
-                if parsed:
-                    self.log(
-                        f"Live ROS reading succeeded: {parsed.get('battery_percentage')}% "
-                        f"({parsed.get('voltage')}V, {parsed.get('power_supply_status')})"
-                    )
-                    return parsed
+                if res.returncode == 0:
+                    self.log(f"✅ Physical wave skill completed successfully (code 0).")
+                    return
                 else:
-                    self.log(f"ROS query returned code {res.returncode}. Output snippet: {output.strip()[:140]}")
+                    self.log(f"⚠️ Wave command exited with code {res.returncode}. Snippet: {output.strip()[:140]}")
             except subprocess.TimeoutExpired:
-                self.log(f"⚠️ Timeout ({timeout_sec}s) waiting for ROS topic {self.ros_battery_topic}")
+                self.log(f"⚠️ Timeout ({timeout_sec}s) executing wave skill '{self.skill_id}'")
+                return
             except Exception as exc:
-                self.log(f"⚠️ Error running ROS query: {exc}")
+                self.log(f"⚠️ Error executing wave skill: {exc}")
 
-        return None
+    def trigger_wave(self, reason: str = "greeting") -> dict:
+        """Trigger physical wave skill non-blockingly with motor cooldown check."""
+        with self._wave_lock:
+            now = time.time()
+            elapsed = now - self._last_wave_time
+            if elapsed < self.cooldown_seconds:
+                remaining = round(self.cooldown_seconds - elapsed, 1)
+                self.log(f"Wave cooldown active ({remaining}s remaining). Skipping physical actuation.")
+                return {
+                    "status": "cooldown",
+                    "action": "wave",
+                    "skill": self.skill_id,
+                    "message": "The robot recently waved its arm.",
+                }
+            self._last_wave_time = now
 
-    def get_robot_status_data(self, node_info: dict | None = None) -> dict:
-        """Collect live robot telemetry from ROS 2 on-demand (no hardcoded values)."""
-        live_data = self._fetch_ros_battery()
-        if live_data:
-            return live_data
+        self.log(f"Triggering physical wave arm motion (reason: {reason})")
+        # Launch physical movement asynchronously so radio message is never delayed
+        actuation_thread = threading.Thread(
+            target=self._run_physical_wave,
+            name="InnateWaveSkillThread",
+            daemon=True,
+        )
+        actuation_thread.start()
 
-        # If ROS 2 is unreachable, return an explicit error state so Gemma knows
-        # and doesn't fabricate a fake reading:
         return {
-            "error": f"Unable to read live topic {self.ros_battery_topic} from ROS 2",
-            "status": "unreachable",
+            "status": "success",
+            "action": "waving arm",
+            "skill": self.skill_id,
+            "message": "The robot is physically waving its arm to greet the user.",
         }
-
-    def format_status_fallback(self, data: dict) -> str:
-        """Format telemetry dictionary as a clean string for slash commands."""
-        if "error" in data:
-            return f"⚠️ Status error: {data['error']}"
-
-        pct = data.get("battery_percentage", data.get("battery", "?"))
-        volt = data.get("voltage")
-        status = data.get("power_supply_status", data.get("status", "unknown"))
-
-        msg = f"Battery: {pct}%"
-        if volt:
-            msg += f" ({volt}V)"
-        if status:
-            msg += f" [{status}]"
-
-        cells = data.get("cells")
-        if cells:
-            msg += f" | Cells: {cells}"
-        return msg
 
     # ── Lifecycle Hooks ──────────────────────────────────────────────────
     def on_load(self) -> None:
-        """Set up AI tool wrapper on load."""
-        self._patched_modules: list[tuple[object, object]] = []
-        self._orig_ctx_fn = None
+        """Register wave tool in shared Gemma tool registry and install interceptor."""
         self._register_in_tool_registry()
         self._install_ai_interceptor()
-        self.log(f"Get Status extension loaded (v{self.version}). Live ROS queries enabled on {self.ros_battery_topic}.")
+        self.log(f"Wave extension loaded (v{self.version}). Ready to wave on greetings ({self.skill_id}).")
 
     def on_unload(self) -> None:
-        """Clean up interceptors on unload."""
+        """Unregister tool and clean up interceptor."""
         self._unregister_from_tool_registry()
         self._remove_ai_interceptor()
-        self.log("Get Status extension unloaded.")
+        self.log("Wave extension unloaded.")
 
     # ── Shared Gemma Tool Registry ───────────────────────────────────────
     def _register_in_tool_registry(self) -> None:
-        """Register get_status into the shared tool registry."""
+        """Register the wave tool into app_context['gemma_tool_registry']."""
         registry = self.app_context.setdefault("gemma_tool_registry", {})
         registry[self.tool_name] = {
             "name": self.tool_name,
@@ -241,22 +221,23 @@ class GetStatusExtension(BaseExtension):
             },
             "system_instruction": (
                 f"You have access to a tool named '{self.tool_name}'. "
-                f"Call {self.tool_name} whenever the user asks for battery level, status, reports, "
-                f"health, diagnostics, or power state. "
-                f"When you receive the live telemetry data, parse it and formulate a clear, concise report for the user."
+                f"Call {self.tool_name} whenever the user greets you (e.g. hello, hi, hey, greetings, welcome) or asks you to wave. "
+                f"When the wave action completes, formulate a warm, friendly, concise greeting acknowledging the wave."
             ),
-            "handler": lambda args: self.get_robot_status_data(),
-            "format_fallback": self.format_status_fallback,
+            "handler": lambda args: self.trigger_wave(reason="gemma_tool"),
+            "format_fallback": lambda res: self.fallback_reply,
+            "is_greeting": lambda text: bool(GREETING_PATTERN.search(text)),
         }
 
     def _unregister_from_tool_registry(self) -> None:
-        """Remove get_status from the shared tool registry."""
+        """Remove the wave tool from the shared registry."""
         registry = self.app_context.get("gemma_tool_registry", {})
         registry.pop(self.tool_name, None)
 
     # ── AI Pipeline Interception ─────────────────────────────────────────
     def _install_ai_interceptor(self) -> None:
-        """Hook into the core get_ai_response pipeline."""
+        """Hook into get_ai_response pipeline with multi-tool aggregation."""
+        # Check if already installed
         if self.app_context.get("gemma_tool_interceptor_installed"):
             return
 
@@ -294,8 +275,9 @@ class GetStatusExtension(BaseExtension):
         self.app_context["gemma_tool_interceptor_installed"] = True
 
     def _remove_ai_interceptor(self) -> None:
-        """Restore original get_ai_response implementations if no other tools active."""
+        """Restore original get_ai_response if no tools remain."""
         registry = self.app_context.get("gemma_tool_registry", {})
+        # If other extensions (like get_status) still have active tools, keep interceptor active
         active_tools = {k: v for k, v in registry.items() if getattr(v.get("extension"), "enabled", False)}
         if active_tools:
             return
@@ -321,6 +303,7 @@ class GetStatusExtension(BaseExtension):
         and feeds them to Ollama /api/chat.
         """
         registry = self.app_context.get("gemma_tool_registry", {})
+        # Filter to currently enabled extensions
         active_tools = {
             k: v for k, v in registry.items()
             if getattr(v.get("extension"), "enabled", True)
@@ -333,6 +316,9 @@ class GetStatusExtension(BaseExtension):
         main_cfg = self.app_context.get("config", {})
         prov = (provider or main_cfg.get("ai_provider") or "ollama").lower()
         if prov != "ollama" or endpoint:
+            # If prompt is a greeting and wave is enabled, trigger physical wave before falling back
+            if self.enabled and self.trigger_on_greetings and GREETING_PATTERN.search(prompt):
+                self.trigger_wave(reason="non_ollama_greeting")
             return orig_fn(prompt, provider=provider, endpoint=endpoint)
 
         raw_url = main_cfg.get("ollama_url", "http://localhost:11434/api/generate")
@@ -377,7 +363,7 @@ class GetStatusExtension(BaseExtension):
                 chat_url,
                 data=json.dumps(payload).encode("utf-8"),
                 headers={"Content-Type": "application/json"},
-                method="POST"
+                method="POST",
             )
             with urllib.request.urlopen(req, timeout=timeout) as resp:
                 data = json.loads(resp.read().decode("utf-8"))
@@ -393,12 +379,17 @@ class GetStatusExtension(BaseExtension):
                 if fn_name in active_tools:
                     called_tools.append((fn_name, call.get("function", {}).get("arguments") or {}))
 
-            # Tag fallback check (e.g. [CALL:get_status] or call:wave)
+            # Tag fallback check (e.g. [CALL:wave] or call:get_status)
             for tname in active_tools:
                 if not any(t[0] == tname for t in called_tools):
                     tag_pattern = rf"(\[CALL:{re.escape(tname)}\]|<tool_call>{re.escape(tname)}.*?</tool_call>|\bcall:{re.escape(tname)}\b|\b{re.escape(tname)}\(\))"
                     if re.search(tag_pattern, content, re.IGNORECASE):
                         called_tools.append((tname, {}))
+
+            # Greeting safety check: if prompt is clearly a greeting and wave wasn't invoked, trigger wave
+            if self.enabled and self.trigger_on_greetings and GREETING_PATTERN.search(prompt):
+                if not any(t[0] == self.tool_name for t in called_tools):
+                    self.trigger_wave(reason="greeting_observer_fallback")
 
             if called_tools:
                 # ── Execute all invoked tools ─────────────────────────────
@@ -415,10 +406,10 @@ class GetStatusExtension(BaseExtension):
                     res_str = json.dumps(res) if isinstance(res, (dict, list)) else str(res)
                     messages.append({
                         "role": "tool",
-                        "content": res_str
+                        "content": res_str,
                     })
 
-                # ── Turn 2: Feed live data back to Gemma to format ───────
+                # ── Turn 2: Feed tool outputs back to Gemma to format ─────
                 payload["messages"] = messages
                 payload.pop("tools", None)
 
@@ -427,7 +418,7 @@ class GetStatusExtension(BaseExtension):
                         chat_url,
                         data=json.dumps(payload).encode("utf-8"),
                         headers={"Content-Type": "application/json"},
-                        method="POST"
+                        method="POST",
                     )
                     with urllib.request.urlopen(req2, timeout=timeout) as resp2:
                         data2 = json.loads(resp2.read().decode("utf-8"))
@@ -445,37 +436,56 @@ class GetStatusExtension(BaseExtension):
                 if last_tname and last_tname in active_tools:
                     return active_tools[last_tname]["format_fallback"](last_result)
 
-            # Gemma decided no tool was needed; return standard response
+            # Gemma did not invoke any tools; return standard conversational response
             clean_content = sanitize_fn(content) if sanitize_fn else content
             return (clean_content if clean_content else "🤖 [No response]")[:max_len]
 
         except Exception as exc:
             self.log(f"⚠️ Ollama /api/chat failed ({exc}), falling back to core AI")
 
-        # Fallback to original provider on error
+        # Fallback to original provider
+        if self.enabled and self.trigger_on_greetings and GREETING_PATTERN.search(prompt):
+            self.trigger_wave(reason="error_fallback")
+            return self.fallback_reply
+
         return orig_fn(prompt, provider=provider, endpoint=endpoint)
 
-    # ── Command & Channel Hooks ──────────────────────────────────────────
+    # ── Command & Message Hooks ──────────────────────────────────────────
     def handle_command(self, command: str, args: str, node_info: dict) -> str | None:
-        """Handle slash commands like /status or /get_status."""
+        """Handle slash command /wave."""
         if not self.enabled:
             return None
         cmd_lower = command.lower()
-        if cmd_lower in ("/status", "/get_status"):
-            data = self.get_robot_status_data(node_info)
-            self.log(f"Handled command '{command}' from {node_info.get('shortname', '?')}")
-            return self.format_status_fallback(data)
+        if cmd_lower == "/wave":
+            res = self.trigger_wave(reason="slash_command")
+            sender = node_info.get("shortname", "friend")
+            self.log(f"Handled /wave command from {sender}")
+            return f"*Waves arm* Hello {sender}! Innate MARS robot at your service."
         return None
 
     def handle_channel_message(self, text: str, node_info: dict) -> str | None:
-        """Handle plain-text traffic on an assigned agent channel."""
+        """Handle messages on an assigned agent channel."""
         if not self.enabled:
             return None
-        return self._query_gemma_with_tools(text, lambda p: None)
+        return self._query_gemma_with_tools(text, lambda p, **kw: None)
+
+    def on_message(self, message: str, metadata: dict | None = None) -> None:
+        """Observe inbound mesh messages and trigger wave on greetings."""
+        if not self.enabled or not self.trigger_on_greetings:
+            return
+        if not message:
+            return
+        if GREETING_PATTERN.search(message):
+            # Check if this was a broadcast where AI won't reply; wave to greet people in room
+            is_direct = metadata.get("is_direct", False) if metadata else False
+            if not is_direct:
+                sender = metadata.get("sender_info", "mesh") if metadata else "mesh"
+                self.log(f"Greeting observed on mesh from {sender}. Initiating wave actuation.")
+                self.trigger_wave(reason="mesh_broadcast_greeting")
 
     # ── MCP Tools (v0.7.0+) ──────────────────────────────────────────────
     def get_mcp_tools(self) -> list[dict]:
-        """Expose get_status tool to external AI agents via MCP."""
+        """Expose wave tool to external AI agents via MCP."""
         return [{
             "name": self.tool_name,
             "description": self.tool_description,
@@ -486,7 +496,8 @@ class GetStatusExtension(BaseExtension):
         }]
 
     def call_mcp_tool(self, name: str, arguments: dict) -> str:
-        """Handle execution of the get_status MCP tool."""
+        """Handle execution of the wave MCP tool."""
         if name == self.tool_name:
-            return json.dumps(self.get_robot_status_data())
+            res = self.trigger_wave(reason="mcp_tool")
+            return json.dumps(res)
         return f"Unknown tool: {name}"

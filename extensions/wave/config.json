@@ -1,0 +1,11 @@
+{
+  "enabled": true,
+  "tool_name": "wave",
+  "tool_description": "Physically wave the robot's arm to greet someone. Call this whenever the user greets you (hello, hi, hey, greetings, welcome) or asks you to wave.",
+  "skill_id": "innate-os/wave",
+  "wave_command": "innate skill run innate-os/wave",
+  "cooldown_seconds": 6,
+  "enable_commands": true,
+  "trigger_on_greetings": true,
+  "fallback_reply": "*Waves arm* Hello! It's great to hear from you."
+}
