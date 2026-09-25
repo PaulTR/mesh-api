@@ -1,27 +1,20 @@
 {
-  "debug": false, 
+  "debug": false,
   "use_mesh_interface": false,
   "use_wifi": false,
   "wifi_host": "MESHTASTIC NODE IP HERE",
   "wifi_port": 4403,
-
   "use_bluetooth": false,
   "ble_address": "",
-
   "extensions_path": "./extensions",
-  
   "ai_respond_on_longfast": false,
   "respond_to_mqtt_messages": false,
-
   "nodes_online_window_sec": 7200,
-  
   "serial_port": "/dev/ttyACM0",
   "serial_baud": 460800,
-
   "_comment_networks_v070": "v0.7.0: MeshCore is now a first-class radio. Run Meshtastic only, MeshCore only (standalone), or both. Set meshtastic_enabled=false to run a MeshCore-only node with no Meshtastic device.",
   "meshtastic_enabled": true,
   "default_send_network": "auto",
-
   "meshcore": {
     "enabled": false,
     "_comment_connection": "Connection to the MeshCore companion node. connection_type: 'serial', 'tcp', or 'ble'.",
@@ -32,38 +25,39 @@
     "tcp_port": 5000,
     "ble_address": "",
     "ble_pin": "",
-
     "_comment_reconnect": "Bounded connect + exponential-backoff reconnect with a health-checked link watchdog.",
     "auto_reconnect": true,
     "max_reconnect_attempts": 0,
     "connect_timeout_sec": 20,
     "reconnect_interval_sec": 15,
     "max_reconnect_interval_sec": 120,
-
     "_comment_chunking": "Outbound message chunking for MeshCore.",
     "max_message_length": 200,
     "max_chunks": 5,
     "chunk_delay_sec": 2,
-
     "_comment_bridge": "When both radios are present, mirror traffic between networks. Maps are channel index -> channel index.",
     "bridge_enabled": true,
     "bridge_direct_messages": false,
-    "bridge_meshcore_channel_to_meshtastic_channel": { "0": 0 },
-    "bridge_meshtastic_channel_to_meshcore_channel": { "0": 0 },
+    "bridge_meshcore_channel_to_meshtastic_channel": {
+      "0": 0
+    },
+    "bridge_meshtastic_channel_to_meshcore_channel": {
+      "0": 0
+    },
     "meshcore_to_meshtastic_tag": "[MC]",
     "meshtastic_to_meshcore_tag": "[MT]"
   },
-
   "_comment_mcp_v070": "v0.7.0: MCP (Model Context Protocol) server. Lets external AI agents (Claude, Perplexity, Hermes, custom) call MESH-API core functions and extensions as tools over the mesh. Endpoint: POST /mcp. Disabled by default. When enabled with require_auth, an auth_token is auto-generated and printed at startup (also usable as X-API-Key). allow_emergency gates the emergency tool.",
   "mcp": {
     "enabled": false,
     "require_auth": true,
     "auth_token": "",
-    "allowed_origins": ["*"],
+    "allowed_origins": [
+      "*"
+    ],
     "allow_emergency": false,
     "rate_limit_per_min": 120
   },
-
   "_comment_firmware_v070": "v0.7.0: firmware & software update manager. Detects the connected Meshtastic/MeshCore device, checks GitHub for newer Meshtastic firmware, MeshCore firmware, and MESH-API itself, and shows a WebUI notification. allow_flashing (default false) gates actual flashing; auto_update (default false) flashes ESP32 Meshtastic devices unattended when an update is found. nRF52/UF2 + MeshCore fall back to guided web-flasher instructions.",
   "firmware": {
     "auto_check": true,
@@ -74,72 +68,55 @@
     "meshcore_fw_repo": "meshcore-dev/MeshCore",
     "mesh_api_repo": "mr-tbot/mesh-api"
   },
-
   "_comment_channel_agents_v070": "v0.7.0: assign a channel to a specific agent so its plain-text traffic is handled by that agent (generalizes Home Assistant per-channel routing). agent 'ai' routes to a named AI provider (openai, hermes, ollama, home_assistant, etc.); agent 'extension' routes to a loaded extension (e.g. openclaw) via its handle_channel_message()/get_ai_response()/command. Optional require_pin gates a channel. Example: { \"6\": {\"agent\":\"ai\",\"provider\":\"hermes\"}, \"7\": {\"agent\":\"extension\",\"slug\":\"openclaw\"} }",
   "channel_agents": {},
-
-  "ai_command": "",
-  "ai_provider": "lmstudio, openai, ollama, claude, gemini, grok, openrouter, groq, deepseek, mistral, or openai_compatible",
+  "ai_command": "/ai-k9",
+  "ai_provider": "ollama",
   "system_prompt": "You are a helpful assistant responding to mesh network chats. Respond in as few words as possible while still answering fully.",
-
   "lmstudio_url": "http://localhost:1234/v1/chat/completions",
   "lmstudio_chat_model": "MODEL IDENTIFIER HERE",
   "lmstudio_embedding_model": "TEXT EMBEDDING MODEL IDENTIFIER HERE",
   "lmstudio_timeout": 60,
-  
   "openai_api_key": "",
   "openai_model": "gpt-4.1-mini",
   "openai_timeout": 60,
-
   "ollama_url": "http://localhost:11434/api/generate",
   "ollama_model": "gemma4:e2b-it-qat",
   "ollama_timeout": 180,
   "ollama_max_parallel": 1,
   "ollama_options": {},
   "ollama_keep_alive": "10m",
-
   "claude_api_key": "",
   "claude_model": "claude-sonnet-4-20250514",
   "claude_timeout": 60,
-
   "gemini_api_key": "",
   "gemini_model": "gemini-2.0-flash",
   "gemini_timeout": 60,
-
   "grok_api_key": "",
   "grok_model": "grok-3",
   "grok_timeout": 60,
-
   "openrouter_api_key": "",
   "openrouter_model": "openai/gpt-4.1-mini",
   "openrouter_timeout": 60,
-
   "groq_api_key": "",
   "groq_model": "llama-3.3-70b-versatile",
   "groq_timeout": 60,
-
   "deepseek_api_key": "",
   "deepseek_model": "deepseek-chat",
   "deepseek_timeout": 60,
-
   "mistral_api_key": "",
   "mistral_model": "mistral-small-latest",
   "mistral_timeout": 60,
-
   "_comment_hermes": "Nous Research Hermes models via their OpenAI-compatible inference API. Set ai_provider to 'hermes' to use.",
   "hermes_api_key": "",
   "hermes_url": "https://inference-api.nousresearch.com/v1/chat/completions",
   "hermes_model": "Hermes-4-405B",
   "hermes_timeout": 60,
-
   "openai_compatible_api_key": "",
   "openai_compatible_url": "",
   "openai_compatible_model": "",
   "openai_compatible_timeout": 60,
-
   "_note_extensions": "Discord, Home Assistant, and other integrations are now configured in their own config.json files under extensions/. Legacy keys here are auto-migrated on first run.",
-
-
   "channel_names": {
     "0": "LongFast",
     "1": "Channel 1",
@@ -152,31 +129,23 @@
     "8": "Channel 8",
     "9": "Channel 9"
   },
-  
   "reply_in_channels": true,
   "reply_in_directs": true,
-  
   "chunk_size": 200,
   "max_ai_chunks": 5,
   "chunk_delay": 10,
-  
   "local_location_string": "@ YOUR LOCATION HERE",
   "ai_node_name": "Mesh-API-Alpha",
-
-  "force_node_num": null,
   "max_message_log": 0,
-
   "enable_twilio": false,
   "enable_smtp": false,
   "alert_phone_number": "+15555555555",
   "twilio_sid": "TWILIO_SID",
   "twilio_auth_token": "TWILIO_AUTH_TOKEN",
   "twilio_from_number": "+14444444444",
-
   "twilio_inbound_target": "channel",
   "twilio_inbound_channel_index": 1,
   "twilio_inbound_node": "!FFFFFFFF",
-
   "smtp_host": "SMTP HOST HERE",
   "smtp_port": 465,
   "smtp_user": "SMTP USER HERE",
